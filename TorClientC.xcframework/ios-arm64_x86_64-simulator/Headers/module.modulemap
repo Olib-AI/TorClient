@@ -1,0 +1,9 @@
+module TorClientC {
+    header "tor_api.h"
+
+    export *
+
+    // libTorClient.a contains all symbols: Tor + OpenSSL + libevent + zlib
+    // No separate link directives needed - everything is bundled
+    link "TorClient"
+}

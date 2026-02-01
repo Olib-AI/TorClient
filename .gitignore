@@ -1,0 +1,14 @@
+# Build artifacts
+.build/
+DerivedData/
+
+# macOS
+.DS_Store
+*.swp
+
+# Xcode
+xcuserdata/
+*.xcscmblueprint
+
+# Swift Package Manager
+Package.resolved
