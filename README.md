@@ -20,9 +20,51 @@ This package provides a native Swift wrapper around the Tor C library, enabling 
 
 ## Requirements
 
-- iOS 18.0+ / macOS 14.0+
+- iOS 18.0+
 - Swift 6.0+
 - Xcode 16+
+
+### Build Requirements (only if building from source)
+
+To build the XCFramework from source, you also need:
+
+- macOS with Apple Silicon (arm64) or Intel Mac
+- Xcode Command Line Tools (`xcode-select --install`)
+- [Homebrew](https://brew.sh) packages:
+
+```bash
+brew install autoconf automake libtool pkg-config
+```
+
+## Building from Source
+
+The `TorClientC.xcframework` is included pre-built for convenience. If you want to build it yourself (to verify, modify, or update versions):
+
+```bash
+# From the TorClient package directory:
+./Scripts/build-xcframework.sh
+
+# Or clean and rebuild:
+./Scripts/build-xcframework.sh --clean
+```
+
+The build script will:
+
+1. Download source tarballs from official mirrors (zlib, OpenSSL, libevent, Tor)
+2. Cross-compile each library for iOS device (arm64) and simulator (arm64 + x86_64 stub)
+3. Combine all libraries into a single `libTorClient.a` per platform
+4. Package everything into `TorClientC.xcframework`
+
+| Library | Version | Source |
+|---------|---------|--------|
+| Tor | 0.4.8.22 | https://dist.torproject.org/ |
+| OpenSSL | 3.6.1 | https://github.com/openssl/openssl |
+| libevent | 2.1.12-stable | https://github.com/libevent/libevent |
+| zlib | 1.3.1 | https://zlib.net/ |
+
+**Build time**: ~10-30 minutes depending on CPU. OpenSSL is the longest step.
+
+Downloaded source tarballs are cached in `.build-tor/` and reused on subsequent runs.
 
 ## Installation
 
@@ -264,19 +306,21 @@ let port = TorService.shared.actualSocksPort
 
 ```
 TorClient/
-├── Package.swift              # Swift Package manifest
+├── Package.swift                  # Swift Package manifest
+├── Scripts/
+│   └── build-xcframework.sh      # Build Tor + deps from source
 ├── Sources/
 │   └── TorClientWrapper/
-│       └── TorService.swift   # Swift actor wrapping Tor C API
-└── TorClientC.xcframework/    # Pre-built static libraries
-    ├── ios-arm64/             # iOS Device
+│       └── TorService.swift       # Swift actor wrapping Tor C API
+└── TorClientC.xcframework/        # Pre-built static libraries
+    ├── ios-arm64/                 # iOS Device
     │   ├── Headers/
-    │   │   ├── tor_api.h      # Tor C API
+    │   │   ├── tor_api.h          # Tor C API
     │   │   ├── module.modulemap
-    │   │   └── openssl/       # OpenSSL headers
-    │   └── libTorClient.a     # Combined static library (~13MB)
+    │   │   └── openssl/           # OpenSSL headers
+    │   └── libTorClient.a         # Combined static library (~13MB)
     └── ios-arm64_x86_64-simulator/
-        └── ...                # Simulator libraries
+        └── ...                    # Simulator libraries (arm64 real + x86_64 stub)
 ```
 
 ### Library Contents
