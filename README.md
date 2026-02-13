@@ -57,7 +57,7 @@ The build script will:
 
 | Library | Version | Source |
 |---------|---------|--------|
-| Tor | 0.4.8.22 | https://dist.torproject.org/ |
+| Tor | 0.4.9.5 | https://dist.torproject.org/ |
 | OpenSSL | 3.6.1 | https://github.com/openssl/openssl |
 | libevent | 2.1.12-stable | https://github.com/libevent/libevent |
 | zlib | 1.3.1 | https://zlib.net/ |
@@ -326,7 +326,7 @@ TorClient/
 ### Library Contents
 
 `libTorClient.a` is a combined static library containing:
-- **Tor 0.4.8.22**: The Onion Router (client-only build)
+- **Tor 0.4.9.5**: The Onion Router (client-only build)
 - **OpenSSL 3.6.1**: Cryptographic library
 - **libevent 2.1.12**: Event notification library
 - **zlib 1.3.1**: Compression library
