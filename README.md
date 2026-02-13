@@ -8,6 +8,10 @@ Used in [StealthOS](https://www.stealthos.app) - The privacy-focused operating e
 
 This package provides a native Swift wrapper around the Tor C library, enabling anonymous network access directly within your app without external dependencies.
 
+## Why We Built Our Own Tor Client
+
+Because we can. We wanted a clean, slim Tor client that we fully control — from source compilation to the final binary. No bloated wrappers, no outdated dependencies dragged in from abandoned repos, no guessing what's inside the black box. Just Tor compiled from official sources, statically linked, with a modern Swift API on top. Full transparency, full control, minimal footprint.
+
 ## Features
 
 - **Embedded Tor Daemon**: Full Tor implementation compiled as a static library - no external processes or dependencies
