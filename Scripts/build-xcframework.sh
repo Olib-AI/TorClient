@@ -23,7 +23,7 @@ set -e
 # CONFIGURATION
 # =============================================================================
 
-ZLIB_VERSION="1.3.1"
+ZLIB_VERSION="1.3.2"
 OPENSSL_VERSION="3.6.1"
 LIBEVENT_VERSION="2.1.12-stable"
 TOR_VERSION="0.4.9.5"
