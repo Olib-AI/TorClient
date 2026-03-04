@@ -21,6 +21,7 @@ Because we can. We wanted a clean, slim Tor client that we fully control — fro
 - **Swift Concurrency**: Modern async/await API with strict Swift 6 concurrency compliance
 - **Actor Isolation**: Thread-safe `TorService` actor ensures data race prevention
 - **Circuit Management**: Extended circuit lifetime settings for stable long-running connections
+- **New Circuit on Demand**: Request new Tor identity (SIGNAL NEWNYM) via in-process control socket
 
 ## Requirements
 
@@ -241,6 +242,13 @@ public func stop() async throws
 /// - Parameter timeout: Maximum time to wait (default: 120 seconds)
 public func waitForBootstrap(timeout: TimeInterval = 120) async throws
 
+/// Request a new Tor circuit (new identity / exit node)
+/// Sends SIGNAL NEWNYM via the in-process control socket.
+public func sendNewnym() async throws
+
+/// Whether the control socket is available for sending commands
+public var hasControlSocket: Bool { get }
+
 /// Get current bootstrap progress (0-100)
 public func getBootstrapProgress() async -> Int?
 
@@ -285,12 +293,13 @@ public enum TorError: Error, Sendable {
 
 **Best Practice**: Keep Tor running for the lifetime of your application. If you need to "disconnect," simply stop routing traffic through the SOCKS5 proxy rather than stopping the daemon.
 
-### No Control Port
+### In-Process Control Socket (No TCP Control Port)
 
-This implementation parses Tor's stdout for status monitoring instead of using the control port. This approach:
-- Avoids potential port conflicts
-- Reduces attack surface
+This implementation uses `tor_main_configuration_setup_control_socket()` to obtain a pre-authenticated in-process control socket instead of a TCP control port. Status monitoring is done by parsing Tor's stdout. This approach:
+- Avoids TCP port conflicts
+- Reduces attack surface (no network-accessible control port)
 - Works reliably on iOS where socket permissions may be restricted
+- Enables `SIGNAL NEWNYM` for requesting new circuits/identities on demand
 
 ### Thread Safety
 
@@ -343,8 +352,10 @@ All dependencies are statically linked - no dynamic frameworks required.
 2. **Startup**: `TorService.start()` launches `tor_run_main()` in a background thread
 3. **Port Discovery**: stdout is parsed to find the auto-assigned SOCKS5 port
 4. **Bootstrap Monitoring**: stdout is parsed for bootstrap progress (0-100%)
-5. **SOCKS5 Proxy**: Applications route traffic through `127.0.0.1:<port>`
-6. **Persistence**: Tor daemon runs until app termination (no restart capability)
+5. **Control Socket**: `tor_main_configuration_setup_control_socket()` provides a pre-authenticated control connection for runtime commands
+6. **SOCKS5 Proxy**: Applications route traffic through `127.0.0.1:<port>`
+7. **New Circuit**: `sendNewnym()` writes `SIGNAL NEWNYM` to the control socket, forcing Tor to build new circuits with a different exit node
+8. **Persistence**: Tor daemon runs until app termination (no restart capability)
 
 ### Tor Configuration Flags
 
@@ -353,7 +364,7 @@ The Swift wrapper sets these Tor options automatically:
 ```
 --DataDirectory /path/to/tor        # State storage
 --SocksPort auto                    # Auto port selection
---ControlPort 0                     # Disable control port
+--ControlPort 0                     # Disable TCP control port (uses in-process socket instead)
 --ClientOnly 1                      # No relay functionality
 --DirCache 0                        # Disable directory cache
 --HiddenServiceStatistics 0         # Disable HS stats

@@ -207,6 +207,36 @@ private final class TorOutputParserState: @unchecked Sendable {
     }
 }
 
+// MARK: - Control Socket Storage
+
+/// Thread-safe storage for the Tor control socket file descriptor.
+/// The FD is set from the Tor background thread and read from the actor.
+private final class ControlSocketStorage: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fd: Int32 = -1
+
+    var fileDescriptor: Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        return fd
+    }
+
+    func setFileDescriptor(_ newFD: Int32) {
+        lock.lock()
+        defer { lock.unlock() }
+        fd = newFD
+    }
+
+    func closeAndReset() {
+        lock.lock()
+        defer { lock.unlock() }
+        if fd >= 0 {
+            close(fd)
+            fd = -1
+        }
+    }
+}
+
 // MARK: - Tor Service Actor
 
 /// TorService provides a Swift actor interface to the embedded Tor daemon.
@@ -235,6 +265,11 @@ public actor TorService {
     private var torThread: Thread?
     private var _isRunning = false
     private let parserState = TorOutputParserState()
+
+    /// Control socket file descriptor for sending commands to Tor (e.g. SIGNAL NEWNYM)
+    /// Set by runTorMain() via tor_main_configuration_setup_control_socket()
+    /// Uses thread-safe storage since it's set from the Tor thread and read from the actor
+    private let controlSocketStorage = ControlSocketStorage()
 
     private var statusContinuation: AsyncStream<TorStatus>.Continuation?
     public private(set) var status: TorStatus = .idle
@@ -415,6 +450,9 @@ public actor TorService {
             waitCount += 1
         }
 
+        // Close control socket if open
+        controlSocketStorage.closeAndReset()
+
         _isRunning = false
         torThread = nil
         stdoutPipe = nil
@@ -473,6 +511,50 @@ public actor TorService {
         throw TorError.bootstrapTimeout
     }
 
+    /// Whether the control socket is available for sending commands
+    public nonisolated var hasControlSocket: Bool {
+        controlSocketStorage.fileDescriptor >= 0
+    }
+
+    // MARK: - Circuit Control
+
+    /// Send SIGNAL NEWNYM to Tor via the control socket to request a new circuit (new identity).
+    public func sendNewnym() async throws {
+        guard _isRunning else {
+            throw TorError.notRunning
+        }
+
+        let fd = controlSocketStorage.fileDescriptor
+        guard fd >= 0 else {
+            throw TorError.controlSocketFailed
+        }
+
+        // The control socket from tor_main_configuration_setup_control_socket()
+        // is pre-authenticated — no AUTHENTICATE command needed.
+        let command = "SIGNAL NEWNYM\r\n"
+        let bytes = Array(command.utf8)
+        let written = bytes.withUnsafeBufferPointer { buffer in
+            write(fd, buffer.baseAddress!, buffer.count)
+        }
+
+        guard written == bytes.count else {
+            throw TorError.controlSocketFailed
+        }
+
+        // Read response (expect "250 OK\r\n")
+        var responseBuf = [UInt8](repeating: 0, count: 256)
+        let bytesRead = read(fd, &responseBuf, responseBuf.count)
+
+        if bytesRead > 0 {
+            let response = String(bytes: responseBuf[0..<bytesRead], encoding: .utf8) ?? ""
+            if !response.contains("250") {
+                print("[TorService] NEWNYM unexpected response: \(response)")
+                throw TorError.controlSocketFailed
+            }
+            print("[TorService] NEWNYM sent successfully: \(response.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+    }
+
     // MARK: - Private Methods
 
     private func updateStatus(_ newStatus: TorStatus) {
@@ -490,8 +572,8 @@ public actor TorService {
         args.append("--SocksPort")
         args.append(config.socksPortMode.torArgument)
 
-        // IMPORTANT: Disable control port to avoid binding conflicts
-        // We parse stdout instead for status monitoring
+        // Disable TCP control port — we use the in-process control socket instead
+        // (set up via tor_main_configuration_setup_control_socket in runTorMain)
         args.append("--ControlPort")
         args.append("0")
 
@@ -677,6 +759,16 @@ public actor TorService {
             dup2(originalStderr, STDERR_FILENO)
             close(originalStdout)
             close(originalStderr)
+        }
+
+        // Set up control socket BEFORE tor_run_main() — this gives us a pre-authenticated
+        // control connection to send commands like SIGNAL NEWNYM (new circuit/identity).
+        let controlFD = tor_main_configuration_setup_control_socket(cfg)
+        if controlFD != INVALID_TOR_CONTROL_SOCKET {
+            print("[TorService] Control socket created: fd=\(controlFD)")
+            TorService.shared.controlSocketStorage.setFileDescriptor(controlFD)
+        } else {
+            print("[TorService] WARNING: Failed to create control socket — NEWNYM will not work")
         }
 
         // Convert Swift strings to C strings
