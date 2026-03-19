@@ -1,0 +1,28 @@
+name: Update README version
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update version in README
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i -E "s|(from: \")[0-9]+\.[0-9]+\.[0-9]+(\")|\1${VERSION}\2|g" README.md
+
+      - name: Commit and push if changed
+        run: |
+          git diff --quiet README.md && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "Update README version to ${GITHUB_REF_NAME#v}"
+          git push
