@@ -272,6 +272,11 @@ public actor TorService {
     private let controlSocketStorage = ControlSocketStorage()
 
     private var statusContinuation: AsyncStream<TorStatus>.Continuation?
+    private lazy var _statusStream: AsyncStream<TorStatus> = {
+        AsyncStream { continuation in
+            self.statusContinuation = continuation
+        }
+    }()
     public private(set) var status: TorStatus = .idle
 
     // Pipe for capturing Tor stdout
@@ -469,9 +474,7 @@ public actor TorService {
 
     /// Status update stream
     public var statusStream: AsyncStream<TorStatus> {
-        AsyncStream { continuation in
-            self.statusContinuation = continuation
-        }
+        _statusStream
     }
 
     /// Get bootstrap progress from parsed stdout (0-100)
