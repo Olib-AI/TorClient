@@ -9,13 +9,15 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
     steps:
       - uses: actions/checkout@v4
 
       - name: Check Tor releases
         run: |
-          CURRENT_TOR="0.4.9.5"
-          LATEST_TOR=$(curl -s https://api.github.com/repos/torproject/tor/tags | jq -r '.[0].name' | sed 's/^tor-//')
+          CURRENT_TOR="0.4.9.6"
+          LATEST_TOR=$(curl -s https://dist.torproject.org/ | grep -o 'tor-[0-9.]*\.tar\.gz' | sed 's/tor-//;s/\.tar\.gz//' | sort -V | tail -n 1)
           echo "Current Tor: $CURRENT_TOR"
           echo "Latest Tor:  $LATEST_TOR"
           if [ "$CURRENT_TOR" != "$LATEST_TOR" ]; then
