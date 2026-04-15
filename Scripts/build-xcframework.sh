@@ -24,7 +24,7 @@ set -e
 # =============================================================================
 
 ZLIB_VERSION="1.3.2"
-OPENSSL_VERSION="3.6.1"
+OPENSSL_VERSION="4.0.0"
 LIBEVENT_VERSION="2.1.12-stable"
 TOR_VERSION="0.4.9.6"
 MIN_IOS="18.0"
