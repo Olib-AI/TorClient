@@ -16,7 +16,7 @@ jobs:
 
       - name: Check Tor releases
         run: |
-          CURRENT_TOR="0.4.9.9"
+          CURRENT_TOR="0.4.9.10"
           LATEST_TOR=$(curl -s https://dist.torproject.org/ | grep -o 'tor-[0-9.]*\.tar\.gz' | sed 's/tor-//;s/\.tar\.gz//' | sort -V | tail -n 1)
           echo "Current Tor: $CURRENT_TOR"
           echo "Latest Tor:  $LATEST_TOR"
@@ -27,7 +27,7 @@ jobs:
 
       - name: Check OpenSSL releases
         run: |
-          CURRENT_OPENSSL="4.0.0"
+          CURRENT_OPENSSL="4.0.1"
           LATEST_OPENSSL=$(curl -s https://api.github.com/repos/openssl/openssl/tags | jq -r '[.[] | select(.name | test("^openssl-[0-9]+\\.[0-9]+\\.[0-9]+$")) | .name][0]' | sed 's/^openssl-//')
           echo "Current OpenSSL: $CURRENT_OPENSSL"
           echo "Latest OpenSSL:  $LATEST_OPENSSL"
