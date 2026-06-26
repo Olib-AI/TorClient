@@ -16,7 +16,7 @@ jobs:
 
       - name: Check Tor releases
         run: |
-          CURRENT_TOR="0.4.9.10"
+          CURRENT_TOR="0.4.9.11"
           LATEST_TOR=$(curl -s https://dist.torproject.org/ | grep -o 'tor-[0-9.]*\.tar\.gz' | sed 's/tor-//;s/\.tar\.gz//' | sort -V | tail -n 1)
           echo "Current Tor: $CURRENT_TOR"
           echo "Latest Tor:  $LATEST_TOR"
