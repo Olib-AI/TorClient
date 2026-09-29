@@ -24,9 +24,9 @@ set -e
 # =============================================================================
 
 ZLIB_VERSION="1.3.2"
-OPENSSL_VERSION="4.0.2"
-LIBEVENT_VERSION="2.1.12-stable"
-TOR_VERSION="0.4.9.12"
+OPENSSL_VERSION="4.0.3"
+LIBEVENT_VERSION="2.1.13-stable"
+TOR_VERSION="0.4.9.13"
 MIN_IOS="18.0"
 
 ZLIB_URL="https://zlib.net/zlib-${ZLIB_VERSION}.tar.gz"

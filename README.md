@@ -62,9 +62,9 @@ The build script will:
 
 | Library | Version | Source |
 |---------|---------|--------|
-| Tor | 0.4.9.12 | https://dist.torproject.org/ |
-| OpenSSL | 4.0.2 | https://github.com/openssl/openssl |
-| libevent | 2.1.12-stable | https://github.com/libevent/libevent |
+| Tor | 0.4.9.13 | https://dist.torproject.org/ |
+| OpenSSL | 4.0.3 | https://github.com/openssl/openssl |
+| libevent | 2.1.13-stable | https://github.com/libevent/libevent |
 | zlib | 1.3.2 | https://zlib.net/ |
 
 **Build time**: ~10-30 minutes depending on CPU. OpenSSL is the longest step.
@@ -339,9 +339,9 @@ TorClient/
 ### Library Contents
 
 `libTorClient.a` is a combined static library containing:
-- **Tor 0.4.9.12**: The Onion Router (client-only build)
-- **OpenSSL 4.0.2**: Cryptographic library
-- **libevent 2.1.12**: Event notification library
+- **Tor 0.4.9.13**: The Onion Router (client-only build)
+- **OpenSSL 4.0.3**: Cryptographic library
+- **libevent 2.1.13**: Event notification library
 - **zlib 1.3.2**: Compression library
 
 All dependencies are statically linked - no dynamic frameworks required.
