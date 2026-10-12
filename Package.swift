@@ -30,7 +30,7 @@ let package = Package(
                 // Force load ensures all object files from the static library are included
                 // Without this, linker strips "unused" internal symbols (OpenSSL, libevent internals)
                 // that are called by Tor but not directly referenced from Swift
-                .unsafeFlags(["-ObjC", "-all_load"])
+                .unsafeFlags(["-Xlinker", "-ObjC", "-Xlinker", "-all_load"])
             ]
         )
     ]
