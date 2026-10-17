@@ -1,5 +1,11 @@
-// swift-tools-version:6.3
+// swift-tools-version: 6.4
 import PackageDescription
+
+// Swift 7 upcoming features adopted early; compile-time only (no runtime change).
+let upcomingFeatures: [SwiftSetting] = [
+    .enableUpcomingFeature("MemberImportVisibility"),
+    .enableUpcomingFeature("ImmutableWeakCaptures"),
+]
 
 let package = Package(
     name: "TorClient",
@@ -26,6 +32,7 @@ let package = Package(
             name: "TorClientWrapper",
             dependencies: ["TorClientC"],
             path: "Sources/TorClientWrapper",
+            swiftSettings: upcomingFeatures,
             linkerSettings: [
                 // Force load ensures all object files from the static library are included
                 // Without this, linker strips "unused" internal symbols (OpenSSL, libevent internals)
