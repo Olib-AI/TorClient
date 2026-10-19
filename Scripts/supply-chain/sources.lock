@@ -1,0 +1,25 @@
+# Pinned upstream sources for Scripts/build-xcframework.sh.
+#
+# Every tarball is checked against the SHA-256 below BEFORE it is extracted,
+# including tarballs already cached in .build-tor/. A mismatch aborts the build
+# (fail closed); nothing is re-downloaded or overwritten automatically.
+#
+# On top of the hash pin, the upstream OpenPGP signature is verified against
+# the pinned keyring in keys/ and the signer's PRIMARY key fingerprint must be
+# one of the fingerprints listed for that file. Tor signs a .sha256sum file
+# rather than the tarball; that file is checked in under signatures/ and must
+# list exactly the pinned hash.
+#
+# Bumping a version: download the new tarball and its upstream signature,
+# verify the signature by hand against the fingerprints published upstream
+# (Tor: support.torproject.org "verify signatures"; OpenSSL:
+# doc/fingerprints.txt; zlib: zlib.net; libevent: release notes), then update
+# the line here and the file under signatures/. Never copy a hash from a
+# tarball you have not verified.
+#
+# Fields (whitespace separated):
+#   tarball  sha256  keyring(keys/)  signature(signatures/)  trusted-primary-fingerprints(comma separated)
+zlib-1.3.2.tar.gz              bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16  zlib.asc      zlib-1.3.2.tar.gz.asc                  5ED46A6721D365587791E2AA783FCD8E58BCAFBA
+openssl-4.0.3.tar.gz           325b5c806167c13b40b1ffeadfe0248197c00eccc4cf123ec1e28d2d2fd216d9  openssl.asc   openssl-4.0.3.tar.gz.asc               B146647E45A7B33947AB226B2A2C87D161692D40
+libevent-2.1.13-stable.tar.gz  f7e9383b8c0baa81b687e5b5eecc01beefaf1b19b64151d95ed61647fe7a315c  libevent.asc  libevent-2.1.13-stable.tar.gz.asc      2133BC600AB133E1D826D173FE43009C4607B1FB
+tor-0.4.9.14.tar.gz            182449ac1c8ff43278da27b69b02040e11d03d0327db6d9126e4190ec6235e4a  tor.asc       tor-0.4.9.14.tar.gz.sha256sum.asc      1C1BC007A9F607AA8152C040BEA7B180B1491921,B74417EDDF22AC9F9E90F49142E86A2A11F48D36,2133BC600AB133E1D826D173FE43009C4607B1FB

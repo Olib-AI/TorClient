@@ -41,7 +41,7 @@ To build the XCFramework from source, you also need:
 - [Homebrew](https://brew.sh) packages:
 
 ```bash
-brew install autoconf automake libtool pkg-config
+brew install autoconf automake libtool pkg-config gnupg
 ```
 
 ## Building from Source
@@ -54,15 +54,40 @@ The `TorClientC.xcframework` is included pre-built for convenience. If you want 
 
 # Or clean and rebuild:
 ./Scripts/build-xcframework.sh --clean
+
+# Only download + verify the pinned tarballs:
+./Scripts/build-xcframework.sh --sources-only
 ```
 
 The build script will:
 
-1. Download source tarballs from official mirrors (zlib, OpenSSL, libevent, Tor)
+1. Download source tarballs from official mirrors (zlib, OpenSSL, libevent, Tor) and **verify them before use** (cached copies included): the SHA-256 pinned in `Scripts/supply-chain/sources.lock`, plus the upstream OpenPGP signature checked against the pinned keyrings in `Scripts/supply-chain/keys/` (Tor's signed `.sha256sum`, OpenSSL, zlib and libevent detached signatures in `Scripts/supply-chain/signatures/`). Any mismatch aborts the build; nothing is re-downloaded over a bad file
 2. Apply the local Tor patches in `Scripts/patches/` (each has a header explaining the bug; they are upstream candidates). A cached Tor build is redone automatically when the patch set changes
-3. Cross-compile each library for iOS device (arm64) and simulator (arm64 + x86_64 stub)
-4. Combine all libraries into a single `libTorClient.a` per platform
-5. Package everything into `TorClientC.xcframework`
+3. Cross-compile each library for iOS device **arm64 and arm64e** (pointer authentication) and simulator (arm64 + x86_64 stub), with hardening on every C file: `-ftrivial-auto-var-init=zero`, typed allocator support (`-ftyped-memory-operations`) and Apple's security warning set. Warning counts land in `.build-tor/logs/warnings-summary.txt`
+4. Combine all libraries into a single `libTorClient.a` per platform; the device library is one fat arm64 + arm64e archive (xcframework identifier `ios-arm64_arm64e`)
+5. Package everything into `TorClientC.xcframework` and record every file's SHA-256 in `TorClientC.xcframework.sha256`
+
+The build is **reproducible**: two builds from different directories produce
+byte-identical xcframeworks (fixed `SOURCE_DATE_EPOCH`, `ZERO_AR_DATE`,
+`-ffile-prefix-map`, neutral install prefixes, so no build-machine path ends up in the
+binary). To check, build twice and compare the manifests:
+
+```bash
+TORCLIENT_BUILD_DIR=/tmp/tc-a TORCLIENT_OUTPUT_DIR=/tmp/tc-a ./Scripts/build-xcframework.sh
+diff <(grep -v '^#' TorClientC.xcframework.sha256) <(grep -v '^#' /tmp/tc-a/TorClientC.xcframework.sha256)
+```
+
+StealthOS's `Scripts/verify-release.sh` checks the shipped xcframework against
+`TorClientC.xcframework.sha256` before every release.
+
+`./Scripts/test-supply-chain.sh` proves the checks fail closed: tampered cached
+tarballs, unpinned files, edited pins, corrupted signatures, the wrong key, a forged
+Tor checksum file, and an end-to-end build run on a tampered tarball must all abort.
+
+**Bumping a version:** download the new tarball and its signature, verify the
+signature by hand against the fingerprints the project publishes, then update the
+line in `sources.lock` and the file in `signatures/` (see the comments in
+`sources.lock`). Never copy a hash from a tarball you have not verified.
 
 | Patch | Fixes |
 |-------|-------|
@@ -366,23 +391,31 @@ let port = TorService.shared.actualSocksPort
 TorClient/
 ├── Package.swift                  # Swift Package manifest
 ├── Scripts/
-│   ├── build-xcframework.sh      # Build Tor + deps from source
+│   ├── build-xcframework.sh      # Build Tor + deps from source (hardened, reproducible)
+│   ├── test-supply-chain.sh      # Proves tarball verification fails closed
+│   ├── openssl/ios64e.conf       # OpenSSL target for the arm64e slice
+│   ├── supply-chain/             # sources.lock (pinned SHA-256), keys/, signatures/, verify.sh
 │   └── patches/                   # Local Tor patches (upstream candidates)
 ├── Sources/
 │   └── TorClientWrapper/
 │       ├── TorService.swift       # Swift actor wrapping Tor C API
 │       ├── TorControlProtocol.swift # Pure reply parser, command builder, value helpers
 │       └── TorControlChannel.swift  # Bounded, serialized control-socket I/O
+├── TorClientC.xcframework.sha256  # SHA-256 of every xcframework file (reproducible build)
 └── TorClientC.xcframework/        # Pre-built static libraries
-    ├── ios-arm64/                 # iOS Device
+    ├── ios-arm64_arm64e/          # iOS Device: one fat archive, arm64 + arm64e
     │   ├── Headers/
     │   │   ├── tor_api.h          # Tor C API
     │   │   ├── module.modulemap
     │   │   └── openssl/           # OpenSSL headers
-    │   └── libTorClient.a         # Combined static library (~13MB)
+    │   └── libTorClient.a         # Combined static library (~13MB per architecture)
     └── ios-arm64_x86_64-simulator/
         └── ...                    # Simulator libraries (arm64 real + x86_64 stub)
 ```
+
+An app that links TorClient for a device builds both architectures when it enables
+pointer authentication (`ENABLE_POINTER_AUTHENTICATION`); the linker takes the
+matching half of the fat archive. Apps that build arm64 only are unaffected.
 
 ### Library Contents
 
