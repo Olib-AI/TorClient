@@ -207,33 +207,46 @@ private final class TorOutputParserState: @unchecked Sendable {
     }
 }
 
-// MARK: - Control Socket Storage
+// MARK: - Tor Network State
 
-/// Thread-safe storage for the Tor control socket file descriptor.
-/// The FD is set from the Tor background thread and read from the actor.
-private final class ControlSocketStorage: @unchecked Sendable {
+/// Whether Tor's network is enabled (`DisableNetwork=0`) while the daemon runs.
+public enum TorNetworkState: Sendable, Equatable {
+    /// Tor is not running.
+    case stopped
+    /// Running with network enabled (connecting or connected).
+    case enabled
+    /// Running with `DisableNetwork=1`: no circuits, no SOCKS listener, no
+    /// network traffic. `reconnect()` brings it back without a restart.
+    case disabled
+}
+
+// MARK: - Tor Run Handle
+
+/// Tracks one `tor_run_main()` invocation so `stop()` can wait for it to
+/// return (which runs `tor_cleanup()`), instead of abandoning the thread.
+private final class TorRunHandle: @unchecked Sendable {
     private let lock = NSLock()
-    private var fd: Int32 = -1
+    private var exitCode: Int32?
 
-    var fileDescriptor: Int32 {
-        lock.lock()
-        defer { lock.unlock() }
-        return fd
+    var hasExited: Bool { lock.withLock { exitCode != nil } }
+
+    func markExited(_ code: Int32) {
+        lock.withLock { exitCode = code }
     }
 
-    func setFileDescriptor(_ newFD: Int32) {
-        lock.lock()
-        defer { lock.unlock() }
-        fd = newFD
-    }
-
-    func closeAndReset() {
-        lock.lock()
-        defer { lock.unlock() }
-        if fd >= 0 {
-            close(fd)
-            fd = -1
+    /// Waits until `tor_run_main()` returned or `timeout` elapsed. Not
+    /// cancellable on purpose: a shutdown must not be abandoned half way.
+    func waitForExit(timeout: Duration) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if hasExited { return true }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + .milliseconds(50)) {
+                    continuation.resume()
+                }
+            }
         }
+        return hasExited
     }
 }
 
@@ -243,7 +256,17 @@ private final class ControlSocketStorage: @unchecked Sendable {
 ///
 /// The Tor C API is blocking - tor_run_main() does not return until Tor exits.
 /// This implementation uses auto-assigned ports to avoid conflicts with other
-/// Tor instances. The actual SOCKS port is discovered by parsing Tor's stdout.
+/// Tor instances. The actual SOCKS port is discovered by parsing Tor's stdout
+/// and, after a reconnect, from the control port.
+///
+/// Lifecycle:
+/// - `start()` / `waitForBootstrap()` launch the daemon on a dedicated thread.
+/// - `disconnect()` / `reconnect()` toggle `DisableNetwork` over the control
+///   socket: a real network disconnect (all circuits and connections closed,
+///   SOCKS listener closed) without stopping the daemon. Any number of cycles.
+/// - `stop()` asks Tor to exit (`SIGNAL HALT`), waits for `tor_run_main()` to
+///   return and run `tor_cleanup()`; `start()` may then launch it again in the
+///   same process when `supportsInProcessRestart` is true.
 ///
 /// Usage:
 /// ```swift
@@ -266,10 +289,20 @@ public actor TorService {
     private var _isRunning = false
     private let parserState = TorOutputParserState()
 
-    /// Control socket file descriptor for sending commands to Tor (e.g. SIGNAL NEWNYM)
-    /// Set by runTorMain() via tor_main_configuration_setup_control_socket()
-    /// Uses thread-safe storage since it's set from the Tor thread and read from the actor
-    private let controlSocketStorage = ControlSocketStorage()
+    /// Pre-authenticated control connection (our end of the socketpair from
+    /// tor_main_configuration_setup_control_socket()). Attached from the Tor
+    /// thread in runTorMain(); used for NEWNYM, DisableNetwork, GETINFO, HALT.
+    private let control = TorControlChannel()
+
+    /// The current/last tor_run_main() invocation.
+    private var runHandle: TorRunHandle?
+
+    /// True while `DisableNetwork=1` is applied (soft-disconnected).
+    private var networkDisabled = false
+
+    /// Incremented by every disconnect/reconnect/stop so an older in-flight
+    /// reconnect stops waiting and reports `.superseded`.
+    private var networkTransitionGeneration = 0
 
     private var statusContinuation: AsyncStream<TorStatus>.Continuation?
     private lazy var _statusStream: AsyncStream<TorStatus> = {
@@ -291,36 +324,51 @@ public actor TorService {
 
     // MARK: - Public API
 
+    /// Whether `start()` may launch Tor again after `stop()` in the same
+    /// process. True for TorClientC builds that carry
+    /// Scripts/patches/0001-workqueue-per-pool-worker-accounting.patch (stale
+    /// thread-pool statics made the second shutdown abort) and
+    /// 0002-tor-api-owning-controller-socket-double-close.patch.
+    public static let supportsInProcessRestart = true
+
     /// Whether Tor is currently running
     public var isRunning: Bool {
         _isRunning
     }
 
-    /// Whether Tor is ready to accept connections (running and bootstrapped)
+    /// Whether Tor is ready to accept connections (running, network enabled, bootstrapped)
     public var isReady: Bool {
-        _isRunning && parserState.isReady
+        _isRunning && !networkDisabled && parserState.isReady
     }
 
-    /// The actual SOCKS port Tor bound to (discovered from stdout)
-    /// Returns 0 if not yet discovered
+    /// Network state of the running daemon.
+    public var networkState: TorNetworkState {
+        guard _isRunning else { return .stopped }
+        return networkDisabled ? .disabled : .enabled
+    }
+
+    /// The actual SOCKS port Tor bound to (discovered from stdout, refreshed
+    /// from the control port by `reconnect()`). Returns 0 if not yet
+    /// discovered or while the network is disabled (the listener is closed).
     public var actualSocksPort: UInt16 {
-        parserState.socksPort
+        networkDisabled ? 0 : parserState.socksPort
     }
 
     /// Configure Tor with the specified settings
     ///
     /// Note: If Tor is already running, this will throw TorError.alreadyRunning.
-    /// This is intentional - configuration can only happen before start.
-    /// To change configuration, the app must be restarted.
+    /// Configuration can only change between `stop()` and `start()`.
     public func configure(_ config: TorConfiguration) async throws {
         guard !_isRunning else {
             throw TorError.alreadyRunning
         }
 
-        // CRITICAL FIX: Clear data directory before starting to prevent hs_circuitmap_init crash
-        // The Tor library uses global state that is not reset between runs. When tor_run_main()
-        // is called a second time, hs_circuitmap_init() asserts because the hash table is already
-        // initialized. Clearing the data directory ensures a clean slate.
+        // Start every configured run from an empty data directory (the app's
+        // existing privacy behaviour: no state carried over between runs).
+        // Note: this was once believed to prevent the hs_circuitmap_init()
+        // assertion on a second tor_run_main(); it does not - that assertion
+        // came from running a second instance while the first had never
+        // returned. See Scripts/patches/ for what in-process restart needs.
         let fileManager = FileManager.default
         if fileManager.fileExists(atPath: config.dataDirectory.path) {
             try fileManager.removeItem(at: config.dataDirectory)
@@ -337,21 +385,16 @@ public actor TorService {
 
     /// Start Tor daemon
     ///
-    /// CRITICAL: Due to Tor C library limitations, tor_run_main() can only be called
-    /// once per process. The library uses global state that is not reset between calls.
-    /// Calling it a second time causes an assertion failure in hs_circuitmap_init().
-    ///
-    /// This method handles the limitation by:
-    /// - If Tor is already running, returns immediately without error
-    /// - If Tor is not running, starts it in a background thread
+    /// - If Tor is already running, returns immediately without error.
+    /// - After a completed `stop()`, launches a new tor_run_main() in this
+    ///   process (requires `supportsInProcessRestart`).
+    /// - Throws if a previous instance has not finished shutting down;
+    ///   two concurrent tor_run_main() calls share global state and abort.
     ///
     /// The actual SOCKS port is discovered by parsing Tor's stdout output.
     /// Use `actualSocksPort` to get the port once Tor has started.
     public func start() async throws {
-        // If already running, return silently - this is expected behavior
-        // when reconnecting after a disconnect (Tor daemon kept running)
         guard !_isRunning else {
-            // Already running - this is not an error, just return
             return
         }
 
@@ -359,8 +402,19 @@ public actor TorService {
             throw TorError.configurationFailed("Tor not configured")
         }
 
+        if let previous = runHandle {
+            guard previous.hasExited else {
+                throw TorError.startFailed("Previous Tor instance is still shutting down")
+            }
+            guard Self.supportsInProcessRestart else {
+                throw TorError.startFailed("Tor cannot be restarted in this process; relaunch the app")
+            }
+        }
+
         // Reset parser state for fresh start (prevents stale state from previous runs)
         parserState.reset()
+        networkDisabled = false
+        networkTransitionGeneration += 1
 
         updateStatus(.starting)
 
@@ -379,13 +433,18 @@ public actor TorService {
         // Start Tor in background thread
         _isRunning = true
 
+        let handle = TorRunHandle()
+        runHandle = handle
         let parserStateRef = parserState
-        torThread = Thread { [weak self] in
-            self?.runTorMain(
+        let controlRef = control
+        torThread = Thread {
+            TorService.runTorMain(
                 arguments: args,
                 stdoutPipe: stdoutPipe,
                 stderrPipe: stderrPipe,
-                parserState: parserStateRef
+                parserState: parserStateRef,
+                control: controlRef,
+                handle: handle
             )
         }
         torThread?.name = "ai.olib.stealthos.tor"
@@ -400,74 +459,71 @@ public actor TorService {
 
             // Check if there was an error
             if let errorMsg = parserState.errorMessage {
-                _isRunning = false
+                await abandonFailedStart(handle)
                 throw TorError.startFailed(errorMsg)
             }
 
             // Check if thread exited
-            if torThread?.isExecuting != true {
-                _isRunning = false
+            if handle.hasExited {
+                await abandonFailedStart(handle)
                 throw TorError.startFailed("Tor thread exited before binding port")
             }
         }
 
         if parserState.socksPort == 0 {
-            _isRunning = false
+            await abandonFailedStart(handle)
             throw TorError.startFailed("Timeout waiting for Tor to bind SOCKS port")
         }
 
         updateStatus(.connecting)
     }
 
-    /// Stop Tor daemon
+    /// Stop the Tor daemon and wait for tor_run_main() to return.
     ///
-    /// WARNING: DO NOT call this method during normal operation!
+    /// Sends `SIGNAL HALT` (if the control socket is unusable, closes it: it
+    /// is the owning controller connection, so Tor exits), then waits for the
+    /// Tor thread to finish `tor_cleanup()`. Throws `TorError.shutdownFailed`
+    /// if Tor does not exit in time; `start()` then refuses to launch a second
+    /// instance.
     ///
-    /// Due to Tor C library limitations, tor_run_main() can only be called once per
-    /// process. If you stop Tor, it CANNOT be restarted - the app must be terminated.
-    /// The library uses global state (hs_circuitmap) that asserts on second initialization.
-    ///
-    /// This method exists only for:
-    /// - App termination cleanup
-    /// - Extreme error recovery (knowing restart requires app relaunch)
-    ///
-    /// For normal "disconnect" operations, use TorManager.disconnect() which keeps
-    /// the Tor daemon running and only disconnects the proxy layer.
+    /// For a user-facing "disconnect" prefer `disconnect()`: it is faster to
+    /// undo (cached consensus, no thread restart) and stops all traffic too.
     public func stop() async throws {
-        guard _isRunning else {
-            // Not running - just return, don't throw
+        guard _isRunning, let handle = runHandle else {
             return
         }
 
         updateStatus(.stopping)
+        networkTransitionGeneration += 1
 
-        // Close pipes to signal EOF
-        stdoutPipe?.fileHandleForWriting.closeFile()
-        stderrPipe?.fileHandleForWriting.closeFile()
-
-        // Cancel the thread
-        torThread?.cancel()
-
-        // Wait for thread to finish (up to 10 seconds)
-        var waitCount = 0
-        while torThread?.isExecuting == true && waitCount < 100 {
-            try await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
-            waitCount += 1
+        var haltAccepted = false
+        if control.isAttached, !handle.hasExited {
+            if let reply = try? await control.execute(.signal(.halt), timeout: .seconds(5)) {
+                haltAccepted = reply.isSuccess
+            }
+        }
+        if !haltAccepted {
+            await control.close()
         }
 
-        // Close control socket if open
-        controlSocketStorage.closeAndReset()
-
+        let exited = await handle.waitForExit(timeout: .seconds(30))
+        await control.close()
+        releaseOutputPipes()
+        networkDisabled = false
         _isRunning = false
         torThread = nil
-        stdoutPipe = nil
-        stderrPipe = nil
+
+        guard exited else {
+            updateStatus(.error(.shutdownFailed))
+            throw TorError.shutdownFailed
+        }
+        parserState.reset()
         updateStatus(.idle)
     }
 
     /// Get SOCKS proxy URL using the auto-discovered port
     public var socksProxyURL: URL? {
-        let port = parserState.socksPort
+        let port = actualSocksPort
         guard port > 0, _isRunning else { return nil }
         return URL(string: "socks5h://127.0.0.1:\(port)")
     }
@@ -489,6 +545,11 @@ public actor TorService {
         let startTime = Date()
 
         while Date().timeIntervalSince(startTime) < timeout {
+            // A disconnect() while waiting means bootstrap will not finish.
+            if networkDisabled {
+                throw TorControlError.networkDisabled
+            }
+
             let progress = parserState.bootstrapProgress
 
             if parserState.isReady || progress >= 100 {
@@ -504,7 +565,7 @@ public actor TorService {
             }
 
             // Check if thread is still running
-            if torThread?.isExecuting != true {
+            if runHandle?.hasExited != false {
                 throw TorError.startFailed("Tor process exited unexpectedly")
             }
 
@@ -516,46 +577,229 @@ public actor TorService {
 
     /// Whether the control socket is available for sending commands
     public nonisolated var hasControlSocket: Bool {
-        controlSocketStorage.fileDescriptor >= 0
+        control.isAttached
+    }
+
+    // MARK: - Network Disconnect / Reconnect
+
+    /// Soft disconnect: `SETCONF DisableNetwork=1`.
+    ///
+    /// Tor closes every circuit and OR connection, closes its SOCKS listener
+    /// (new SOCKS connections are refused immediately) and makes no network
+    /// traffic until `reconnect()`. The daemon, its consensus and the control
+    /// socket stay alive. Idempotent.
+    ///
+    /// The result is verified with `GETCONF DisableNetwork` and
+    /// `GETINFO status/circuit-established net/listeners/socks ...`; any
+    /// mismatch, non-`2xx` reply, timeout or dead control socket throws a
+    /// `TorControlError` - success is never assumed.
+    public func disconnect(timeout: Duration = .seconds(15)) async throws {
+        guard _isRunning else { throw TorError.notRunning }
+        networkTransitionGeneration += 1
+        try await waitForControlSocket(timeout: timeout)
+
+        try await setDisableNetwork(true, timeout: timeout)
+        networkDisabled = true
+        parserState.setReady(false)
+        parserState.setBootstrapProgress(0)
+        updateStatus(.idle)
+
+        let disabled = try await getConfBool("DisableNetwork", timeout: timeout)
+        guard disabled == true else {
+            throw TorControlError.verificationFailed("DisableNetwork reads back as \(String(describing: disabled))")
+        }
+        let snapshot = try await networkSnapshot(timeout: timeout)
+        guard snapshot.isOffline else {
+            throw TorControlError.verificationFailed(
+                "circuit-established=\(snapshot.circuitEstablished), socks listeners=\(snapshot.socksPorts)"
+            )
+        }
+    }
+
+    /// Re-enables the network (`SETCONF DisableNetwork=0`) and waits until
+    /// Tor has an established circuit and an open SOCKS listener.
+    ///
+    /// `onProgress` receives 0-99 while waiting (Tor's bootstrap percentage
+    /// while it is below 100, otherwise milestone-based) and 100 once usable.
+    /// The SOCKS port usually changes (`SocksPort auto`): read
+    /// `actualSocksPort` afterwards. Time spent suspended in the background
+    /// does not count against `timeout` (see `TorWaitBudget`).
+    ///
+    /// Throws `TorControlError` for control-port failures, `.superseded` if
+    /// `disconnect()`/`stop()` was called meanwhile, `TorError.bootstrapTimeout`
+    /// if no circuit was built in time (the network stays enabled and Tor
+    /// keeps trying), or `CancellationError`.
+    public func reconnect(
+        timeout: Duration = .seconds(120),
+        onProgress: (@Sendable (Int) -> Void)? = nil
+    ) async throws {
+        guard _isRunning else { throw TorError.notRunning }
+        networkTransitionGeneration += 1
+        let generation = networkTransitionGeneration
+        let commandTimeout = Duration.seconds(10)
+        try await waitForControlSocket(timeout: commandTimeout)
+
+        try await setDisableNetwork(false, timeout: commandTimeout)
+        networkDisabled = false
+        let disabled = try await getConfBool("DisableNetwork", timeout: commandTimeout)
+        guard disabled == false else {
+            throw TorControlError.verificationFailed("DisableNetwork reads back as \(String(describing: disabled))")
+        }
+        updateStatus(.connecting)
+
+        let pollInterval = Duration.milliseconds(500)
+        var budget = TorWaitBudget(total: timeout, maxChargePerStep: pollInterval * 4)
+        var lastProgress = -1
+        while true {
+            try Task.checkCancellation()
+            guard generation == networkTransitionGeneration, _isRunning else {
+                throw TorControlError.superseded
+            }
+            if runHandle?.hasExited != false {
+                throw TorError.startFailed("Tor process exited unexpectedly")
+            }
+
+            let stepStart = ContinuousClock.now
+            let snapshot = try await networkSnapshot(timeout: commandTimeout)
+            guard generation == networkTransitionGeneration else { throw TorControlError.superseded }
+
+            let progress = snapshot.reconnectProgress
+            if progress != lastProgress {
+                lastProgress = progress
+                onProgress?(progress)
+                if progress < 100 { updateStatus(.bootstrapping(progress: progress)) }
+            }
+            if snapshot.isOnline, let port = snapshot.socksPorts.first {
+                parserState.setSocksPort(port)
+                parserState.setBootstrapProgress(100)
+                parserState.setReady(true)
+                updateStatus(.ready)
+                return
+            }
+
+            try await Task.sleep(for: pollInterval)
+            budget.charge(stepStart.duration(to: .now))
+            if budget.isExhausted { throw TorError.bootstrapTimeout }
+        }
+    }
+
+    /// One GETINFO round trip describing Tor's network state.
+    public func networkSnapshot(timeout: Duration = .seconds(10)) async throws -> TorNetworkSnapshot {
+        let reply = try await sendControlCommand(
+            try Self.build { () throws(TorControlCommandError) in try .getInfo(TorNetworkSnapshot.getInfoKeys) },
+            timeout: timeout
+        )
+        guard let snapshot = TorNetworkSnapshot(reply: reply) else {
+            throw TorControlError.verificationFailed("Unexpected GETINFO answer")
+        }
+        return snapshot
+    }
+
+    /// Sends a validated control command and returns Tor's `2xx` reply.
+    /// Non-`2xx` answers throw `TorControlError.rejected`.
+    public func sendControlCommand(
+        _ command: TorControlCommand,
+        timeout: Duration = .seconds(10)
+    ) async throws -> TorControlReply {
+        guard _isRunning else { throw TorError.notRunning }
+        let reply = try await control.execute(command, timeout: timeout)
+        guard reply.isSuccess else {
+            throw TorControlError.rejected(command: command.verb, statusCode: reply.statusCode, message: reply.message)
+        }
+        return reply
     }
 
     // MARK: - Circuit Control
 
     /// Send SIGNAL NEWNYM to Tor via the control socket to request a new circuit (new identity).
+    ///
+    /// Throws `TorError.notRunning` / `TorError.controlSocketFailed` as before,
+    /// and `TorControlError.networkDisabled` while soft-disconnected: a new
+    /// identity cannot be built without network, so it fails instead of
+    /// pretending.
     public func sendNewnym() async throws {
         guard _isRunning else {
             throw TorError.notRunning
         }
-
-        let fd = controlSocketStorage.fileDescriptor
-        guard fd >= 0 else {
+        guard control.isAttached else {
             throw TorError.controlSocketFailed
         }
-
-        // The control socket from tor_main_configuration_setup_control_socket()
-        // is pre-authenticated — no AUTHENTICATE command needed.
-        let command = "SIGNAL NEWNYM\r\n"
-        let bytes = Array(command.utf8)
-        let written = bytes.withUnsafeBufferPointer { buffer in
-            write(fd, buffer.baseAddress!, buffer.count)
+        guard !networkDisabled else {
+            throw TorControlError.networkDisabled
         }
 
-        guard written == bytes.count else {
-            throw TorError.controlSocketFailed
-        }
-
-        // Read response (expect "250 OK\r\n")
-        var responseBuf = [UInt8](repeating: 0, count: 256)
-        let bytesRead = read(fd, &responseBuf, responseBuf.count)
-
-        if bytesRead > 0 {
-            let response = String(bytes: responseBuf[0..<bytesRead], encoding: .utf8) ?? ""
-            if !response.contains("250") {
-                print("[TorService] NEWNYM unexpected response: \(response)")
+        do {
+            let reply = try await control.execute(.signal(.newnym), timeout: .seconds(10))
+            guard reply.isSuccess else {
+                print("[TorService] NEWNYM rejected: \(reply.statusCode) \(reply.message)")
                 throw TorError.controlSocketFailed
             }
-            print("[TorService] NEWNYM sent successfully: \(response.trimmingCharacters(in: .whitespacesAndNewlines))")
+            print("[TorService] NEWNYM sent successfully: \(reply.statusCode) \(reply.message)")
+        } catch let error as TorControlError {
+            print("[TorService] NEWNYM failed: \(error.localizedDescription)")
+            throw TorError.controlSocketFailed
         }
+    }
+
+    // MARK: - Control Helpers
+
+    /// Lets builders with typed throws be used where `TorControlError` is expected.
+    private static func build(
+        _ make: () throws(TorControlCommandError) -> TorControlCommand
+    ) throws(TorControlError) -> TorControlCommand {
+        do {
+            return try make()
+        } catch {
+            throw .invalidCommand(error)
+        }
+    }
+
+    private func setDisableNetwork(_ disabled: Bool, timeout: Duration) async throws {
+        let command = try Self.build { () throws(TorControlCommandError) in
+            try .setConf([TorConfigSetting("DisableNetwork", disabled ? "1" : "0")])
+        }
+        _ = try await sendControlCommand(command, timeout: timeout)
+    }
+
+    private func getConfBool(_ key: String, timeout: Duration) async throws -> Bool? {
+        let command = try Self.build { () throws(TorControlCommandError) in try .getConf([key]) }
+        let reply = try await sendControlCommand(command, timeout: timeout)
+        return TorControlValue.bool(reply.keyValues[key])
+    }
+
+    /// The control socket is attached from the Tor thread shortly after
+    /// `start()`; a disconnect during early startup waits for it.
+    private func waitForControlSocket(timeout: Duration) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !control.isAttached {
+            if runHandle?.hasExited != false || ContinuousClock.now >= deadline {
+                throw TorControlError.notConnected
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
+    /// Cleans up after start() gave up: stop the instance if it is still
+    /// running so a later start() does not race a live tor_run_main().
+    private func abandonFailedStart(_ handle: TorRunHandle) async {
+        if !handle.hasExited {
+            if control.isAttached {
+                _ = try? await control.execute(.signal(.halt), timeout: .seconds(5))
+            }
+            await control.close()
+            _ = await handle.waitForExit(timeout: .seconds(30))
+        }
+        await control.close()
+        releaseOutputPipes()
+        _isRunning = false
+        torThread = nil
+    }
+
+    private func releaseOutputPipes() {
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        stdoutPipe = nil
+        stderrPipe = nil
     }
 
     // MARK: - Private Methods
@@ -728,12 +972,21 @@ public actor TorService {
         }
     }
 
-    private nonisolated func runTorMain(
+    /// Body of the Tor thread: one complete tor_run_main() invocation.
+    /// `handle.markExited` runs last, after the configuration is freed and
+    /// stdout/stderr are restored, so `stop()` returning means the thread is
+    /// done with every resource it touched.
+    private static func runTorMain(
         arguments: [String],
         stdoutPipe: Pipe,
         stderrPipe: Pipe,
-        parserState: TorOutputParserState
+        parserState: TorOutputParserState,
+        control: TorControlChannel,
+        handle: TorRunHandle
     ) {
+        var exitCode: Int32 = -1
+        defer { handle.markExited(exitCode) }
+
         // DIAGNOSTIC: Log thread start
         print("[TorService] TOR THREAD STARTING - thread: \(Thread.current.name ?? "unnamed")")
 
@@ -743,8 +996,22 @@ public actor TorService {
             return
         }
 
+        // tor_api.h: argv must stay valid and unchanged until tor_run_main()
+        // returns, so it lives in manually managed memory (not an Array
+        // buffer whose pointer would escape withUnsafeMutableBufferPointer).
+        let argc = arguments.count
+        let argv = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: argc + 1)
+        for (index, argument) in arguments.enumerated() {
+            argv[index] = strdup(argument)
+        }
+        argv[argc] = nil
+
         defer {
+            // Freed after tor_run_main() returned. With
+            // Scripts/patches/0002 this closes each control descriptor once.
             tor_main_configuration_free(cfg)
+            for index in 0..<argc { free(argv[index]) }
+            argv.deallocate()
             // DIAGNOSTIC: Log thread exit
             print("[TorService] TOR THREAD EXITING - configuration freed")
         }
@@ -764,30 +1031,26 @@ public actor TorService {
             close(originalStderr)
         }
 
-        // Set up control socket BEFORE tor_run_main() — this gives us a pre-authenticated
-        // control connection to send commands like SIGNAL NEWNYM (new circuit/identity).
+        // Set up control socket BEFORE tor_run_main(): an anonymous AF_UNIX
+        // socketpair, passed to Tor as __OwningControllerFD. It is
+        // pre-authenticated, reachable by nobody else (no path, no TCP port),
+        // and closing our end makes Tor exit.
         let controlFD = tor_main_configuration_setup_control_socket(cfg)
         if controlFD != INVALID_TOR_CONTROL_SOCKET {
             print("[TorService] Control socket created: fd=\(controlFD)")
-            TorService.shared.controlSocketStorage.setFileDescriptor(controlFD)
+            control.attach(controlFD)
         } else {
-            print("[TorService] WARNING: Failed to create control socket — NEWNYM will not work")
+            print("[TorService] WARNING: Failed to create control socket — NEWNYM/disconnect will not work")
         }
 
-        // Convert Swift strings to C strings
-        var cStrings = arguments.map { strdup($0) }
-        defer { cStrings.forEach { free($0) } }
-
-        let argc = Int32(cStrings.count)
-        cStrings.withUnsafeMutableBufferPointer { buffer in
-            _ = tor_main_configuration_set_command_line(cfg, argc, buffer.baseAddress)
-        }
+        _ = tor_main_configuration_set_command_line(cfg, Int32(argc), argv)
 
         // DIAGNOSTIC: Log before tor_run_main
         print("[TorService] TOR THREAD - calling tor_run_main()")
 
         // This blocks until Tor exits
         let result = tor_run_main(cfg)
+        exitCode = result
 
         // DIAGNOSTIC: Log tor_run_main exit
         print("[TorService] TOR THREAD - tor_run_main() returned with code \(result)")

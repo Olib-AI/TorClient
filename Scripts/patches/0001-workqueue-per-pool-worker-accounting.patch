@@ -1,0 +1,112 @@
+From: StealthOS TorClient <opensource@olib.ai>
+Subject: [PATCH 1/2] workqueue: keep worker start/exit accounting per pool
+Upstream-Status: candidate (not yet submitted)
+Applies-To: tor 0.4.9.14
+
+worker_thread_main() tracked the number of running worker threads and the
+thread that holds pool->control_lock in two function-level statics. They are
+never reset when a pool is freed, so the second thread pool created in the
+same process (cpuworker_init() after an in-process tor_run_main() restart):
+
+  * signals start-up completion one thread early (counter starts at N-1), and
+  * never lets any worker take pool->control_lock (owner id is still the stale
+    id of a thread from the first pool).
+
+threadpool_stop_threads() then acquires the uncontended control_lock without
+waiting for the workers, threadpool_free_() destroys pool->lock and the
+condition while workers are still running, and a worker aborts with
+
+  Raw assertion failed ... compat_mutex_pthreads.c:91: Error unlocking a mutex.
+
+Reproduced on the iOS simulator: run 1 start/HALT is clean, run 2 aborts
+during its shutdown. Moving both values into threadpool_t (plus an explicit
+owned flag, so thread id 0 is not a sentinel) makes every pool start from a
+clean slate. Locking is unchanged: the counter is still incremented under
+control_lock and read/decremented under pool->lock exactly as before.
+---
+--- a/src/lib/evloop/workqueue.c	2026-10-19 12:22:10
++++ b/src/lib/evloop/workqueue.c	2026-10-19 12:22:41
+@@ -96,6 +96,14 @@
+   int exit;
+   /** Mutex for controlling worker threads' startup and exit. */
+   tor_mutex_t control_lock;
++  /** Number of this pool's worker threads that have started and not yet
++   * exited. Per pool (not a function-level static) so that a second pool,
++   * e.g. after an in-process tor_run_main() restart, starts from zero. */
++  int n_worker_threads_running;
++  /** True iff one of this pool's worker threads holds control_lock for the
++   * pool's lifetime; control_lock_owner is that thread's id. */
++  int control_lock_owned;
++  unsigned long control_lock_owner;
+ };
+ 
+ /** Used to put a workqueue_priority_t value into a bitfield. */
+@@ -278,8 +286,6 @@
+ static void
+ worker_thread_main(void *thread_)
+ {
+-  static int n_worker_threads_running = 0;
+-  static unsigned long control_lock_owner = 0;
+   workerthread_t *thread = thread_;
+   threadpool_t *pool = thread->in_pool;
+   workqueue_entry_t *work;
+@@ -287,10 +293,10 @@
+ 
+   tor_mutex_acquire(&pool->control_lock);
+   log_debug(LD_GENERAL, "Worker thread %u/%u has started [TID: %lu].",
+-            n_worker_threads_running + 1, pool->n_threads_max,
++            pool->n_worker_threads_running + 1, pool->n_threads_max,
+             tor_get_thread_id());
+ 
+-  if (++n_worker_threads_running == pool->n_threads_max)
++  if (++pool->n_worker_threads_running == pool->n_threads_max)
+     tor_cond_signal_one(&pool->condition);
+ 
+   tor_mutex_release(&pool->control_lock);
+@@ -299,12 +305,13 @@
+    * pool->lock must be prelocked here. */
+   tor_mutex_acquire(&pool->lock);
+ 
+-  if (control_lock_owner == 0) {
++  if (!pool->control_lock_owned) {
+     /* pool->control_lock stays locked. This is required for the main thread
+      * to wait for the worker threads to exit on shutdown, so the memory
+      * clean up won't begin before all threads have exited. */
+     tor_mutex_acquire(&pool->control_lock);
+-    control_lock_owner = tor_get_thread_id();
++    pool->control_lock_owner = tor_get_thread_id();
++    pool->control_lock_owned = 1;
+   }
+ 
+   log_debug(LD_GENERAL, "Worker thread has entered the work loop [TID: %lu].",
+@@ -373,23 +380,25 @@
+   /* At this point pool->lock must be held */
+ 
+   log_debug(LD_GENERAL, "Worker thread %u/%u has exited [TID: %lu].",
+-            pool->n_threads_max - n_worker_threads_running + 1,
++            pool->n_threads_max - pool->n_worker_threads_running + 1,
+             pool->n_threads_max, tor_get_thread_id());
+ 
+-  if (tor_get_thread_id() == control_lock_owner) {
++  if (pool->control_lock_owned &&
++      tor_get_thread_id() == pool->control_lock_owner) {
+     /* Wait for the other worker threads to exit so we
+      * can safely unlock pool->control_lock. */
+-    while (n_worker_threads_running > 1) {
++    while (pool->n_worker_threads_running > 1) {
+       tor_mutex_release(&pool->lock);
+       tor_sleep_msec(10);
+       tor_mutex_acquire(&pool->lock);
+     }
+ 
+     tor_mutex_release(&pool->lock);
+-    /* Let the main thread know, the last worker thread has exited. */
++    /* Let the main thread know, the last worker thread has exited.
++     * The pool may be freed as soon as this returns: do not touch it. */
+     tor_mutex_release(&pool->control_lock);
+   } else {
+-    --n_worker_threads_running;
++    --pool->n_worker_threads_running;
+     tor_mutex_release(&pool->lock);
+   }
+ }

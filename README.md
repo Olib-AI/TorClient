@@ -22,6 +22,9 @@ Because we can. We wanted a clean, slim Tor client that we fully control — fro
 - **Actor Isolation**: Thread-safe `TorService` actor ensures data race prevention
 - **Circuit Management**: Extended circuit lifetime settings for stable long-running connections
 - **New Circuit on Demand**: Request new Tor identity (SIGNAL NEWNYM) via in-process control socket
+- **Real Disconnect / Reconnect**: `disconnect()` / `reconnect()` toggle `DisableNetwork` over the control socket - all circuits, connections and the SOCKS listener close; reconnect re-bootstraps in seconds, any number of times
+- **In-Process Restart**: `stop()` lets `tor_run_main()` return and clean up; `start()` can launch it again in the same process (with the patches in `Scripts/patches/`)
+- **Validated Control Protocol**: replies are parsed per control-spec (status codes, multi-line, data blocks, size limits), commands are built from validated input only (no CR/LF injection)
 
 ## Requirements
 
@@ -56,9 +59,15 @@ The `TorClientC.xcframework` is included pre-built for convenience. If you want 
 The build script will:
 
 1. Download source tarballs from official mirrors (zlib, OpenSSL, libevent, Tor)
-2. Cross-compile each library for iOS device (arm64) and simulator (arm64 + x86_64 stub)
-3. Combine all libraries into a single `libTorClient.a` per platform
-4. Package everything into `TorClientC.xcframework`
+2. Apply the local Tor patches in `Scripts/patches/` (each has a header explaining the bug; they are upstream candidates). A cached Tor build is redone automatically when the patch set changes
+3. Cross-compile each library for iOS device (arm64) and simulator (arm64 + x86_64 stub)
+4. Combine all libraries into a single `libTorClient.a` per platform
+5. Package everything into `TorClientC.xcframework`
+
+| Patch | Fixes |
+|-------|-------|
+| `0001-workqueue-per-pool-worker-accounting.patch` | Function-level statics in `worker_thread_main()` survive `threadpool_free()`; the second `tor_run_main()` in a process then frees its CPU-worker pool while workers still run and aborts with "Error unlocking a mutex" |
+| `0002-tor-api-owning-controller-socket-double-close.patch` | `tor_main_configuration_free()` closed the owning-controller descriptor that `tor_run_main()` had already closed, which can close an unrelated descriptor in the embedding app |
 
 | Library | Version | Source |
 |---------|---------|--------|
@@ -234,16 +243,41 @@ public func configure(_ config: TorConfiguration) async throws
 /// If already running, returns immediately without error.
 public func start() async throws
 
-/// Stop the Tor daemon
-/// WARNING: Tor C library has global state - cannot restart after stop!
+/// Stop the Tor daemon: SIGNAL HALT, then wait for tor_run_main() to return
+/// (tor_cleanup() runs). start() may launch Tor again afterwards when
+/// TorService.supportsInProcessRestart is true. Throws .shutdownFailed if
+/// Tor does not exit in time (start() then refuses a second instance).
 public func stop() async throws
 
 /// Wait for Tor to fully bootstrap
 /// - Parameter timeout: Maximum time to wait (default: 120 seconds)
 public func waitForBootstrap(timeout: TimeInterval = 120) async throws
 
+/// Real network disconnect without stopping the daemon: SETCONF DisableNetwork=1,
+/// verified with GETCONF/GETINFO. Closes all circuits, connections and the SOCKS
+/// listener. Throws TorControlError on any failure - never assumes success.
+public func disconnect(timeout: Duration = .seconds(15)) async throws
+
+/// SETCONF DisableNetwork=0, then waits for an established circuit and an open
+/// SOCKS listener. The SOCKS port usually changes (SocksPort auto): re-read
+/// actualSocksPort. Time suspended in the background does not use up `timeout`.
+public func reconnect(timeout: Duration = .seconds(120),
+                      onProgress: (@Sendable (Int) -> Void)? = nil) async throws
+
+/// .stopped / .enabled / .disabled (soft-disconnected)
+public var networkState: TorNetworkState { get async }
+
+/// One GETINFO round trip: circuit-established, network-liveness,
+/// bootstrap-phase, SOCKS listeners.
+public func networkSnapshot(timeout: Duration = .seconds(10)) async throws -> TorNetworkSnapshot
+
+/// Send any validated command (TorControlCommand.getInfo / getConf / setConf / signal).
+public func sendControlCommand(_ command: TorControlCommand,
+                               timeout: Duration = .seconds(10)) async throws -> TorControlReply
+
 /// Request a new Tor circuit (new identity / exit node)
 /// Sends SIGNAL NEWNYM via the in-process control socket.
+/// Throws TorControlError.networkDisabled while disconnected.
 public func sendNewnym() async throws
 
 /// Whether the control socket is available for sending commands
@@ -287,19 +321,21 @@ public enum TorError: Error, Sendable {
 
 ## Important Limitations
 
-### Single Instance Per Process
+### One Instance at a Time; Restart Needs the Patches
 
-**CRITICAL**: The Tor C library (`tor_run_main()`) can only be called once per process. The library uses global state that is not reset between calls. Attempting to restart Tor after stopping will cause an assertion failure.
+Only one `tor_run_main()` may run at a time: Tor's globals are per process. The old "assertion in `hs_circuitmap_init()` on restart" was a second instance started while the first had never returned. `stop()` now waits for `tor_run_main()` to return; with `Scripts/patches/0001` a following `start()` works (exercised 10x per process in the StealthOS test suite, including under AddressSanitizer). Without the patch the second shutdown aborts.
 
-**Best Practice**: Keep Tor running for the lifetime of your application. If you need to "disconnect," simply stop routing traffic through the SOCKS5 proxy rather than stopping the daemon.
+**Best Practice**: for a user-facing "disconnect", prefer `disconnect()` / `reconnect()`: no thread restart, cached consensus, reconnects in seconds.
 
 ### In-Process Control Socket (No TCP Control Port)
 
 This implementation uses `tor_main_configuration_setup_control_socket()` to obtain a pre-authenticated in-process control socket instead of a TCP control port. Status monitoring is done by parsing Tor's stdout. This approach:
 - Avoids TCP port conflicts
-- Reduces attack surface (no network-accessible control port)
+- Reduces attack surface: an anonymous `AF_UNIX` socketpair has no filesystem path and no TCP port, so no other app or process can connect to it; it needs no cookie or password because only this process holds the descriptor
 - Works reliably on iOS where socket permissions may be restricted
-- Enables `SIGNAL NEWNYM` for requesting new circuits/identities on demand
+- Enables `SIGNAL NEWNYM`, `DisableNetwork` and `GETINFO` at runtime
+- Is the *owning* controller connection: closing it makes Tor exit
+- Is protected against `SIGPIPE` (`SO_NOSIGPIPE`) and every wait on it is bounded by a timeout
 
 ### Thread Safety
 
@@ -321,10 +357,13 @@ let port = TorService.shared.actualSocksPort
 TorClient/
 ├── Package.swift                  # Swift Package manifest
 ├── Scripts/
-│   └── build-xcframework.sh      # Build Tor + deps from source
+│   ├── build-xcframework.sh      # Build Tor + deps from source
+│   └── patches/                   # Local Tor patches (upstream candidates)
 ├── Sources/
 │   └── TorClientWrapper/
-│       └── TorService.swift       # Swift actor wrapping Tor C API
+│       ├── TorService.swift       # Swift actor wrapping Tor C API
+│       ├── TorControlProtocol.swift # Pure reply parser, command builder, value helpers
+│       └── TorControlChannel.swift  # Bounded, serialized control-socket I/O
 └── TorClientC.xcframework/        # Pre-built static libraries
     ├── ios-arm64/                 # iOS Device
     │   ├── Headers/
@@ -355,7 +394,8 @@ All dependencies are statically linked - no dynamic frameworks required.
 5. **Control Socket**: `tor_main_configuration_setup_control_socket()` provides a pre-authenticated control connection for runtime commands
 6. **SOCKS5 Proxy**: Applications route traffic through `127.0.0.1:<port>`
 7. **New Circuit**: `sendNewnym()` writes `SIGNAL NEWNYM` to the control socket, forcing Tor to build new circuits with a different exit node
-8. **Persistence**: Tor daemon runs until app termination (no restart capability)
+8. **Disconnect / Reconnect**: `disconnect()` / `reconnect()` toggle `DisableNetwork`; the result is verified via `GETCONF` / `GETINFO` (note: `network-liveness` only flips to "down" after circuit timeouts, so `status/circuit-established` and `net/listeners/socks` are what prove a disconnect)
+9. **Stop / Restart**: `stop()` sends `SIGNAL HALT` and waits for `tor_run_main()` to return; `start()` can launch a new instance afterwards
 
 ### Tor Configuration Flags
 
@@ -395,12 +435,13 @@ Tor may take 1-2 minutes to bootstrap on slow networks. Consider:
 
 Use `.auto` port mode (default) to let Tor find an available port.
 
-### Cannot Restart After Stop
+### Restart After Stop Aborts ("Error unlocking a mutex")
 
-This is a known limitation of the Tor C library. Design your app to:
-1. Start Tor once at launch
-2. Keep it running until app termination
-3. "Disconnect" by routing traffic directly instead of through SOCKS5
+The XCFramework was built without `Scripts/patches/0001-workqueue-per-pool-worker-accounting.patch`. Rebuild with `./Scripts/build-xcframework.sh` (it applies the patches), or use `disconnect()` / `reconnect()` instead of `stop()` / `start()`.
+
+### `start()` Throws "Previous Tor instance is still shutting down"
+
+`stop()` timed out (it threw `.shutdownFailed`). A second `tor_run_main()` must not run alongside the first, so `start()` refuses until the old one has returned.
 
 ## License
 

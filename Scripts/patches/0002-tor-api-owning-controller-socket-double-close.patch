@@ -1,0 +1,123 @@
+From: StealthOS TorClient <opensource@olib.ai>
+Subject: [PATCH 2/2] tor_api: stop double-closing the owning controller socket
+Upstream-Status: candidate (not yet submitted)
+Applies-To: tor 0.4.9.14
+
+tor_main_configuration_setup_control_socket() passes fds[1] to tor as
+__OwningControllerFD and also stores it in cfg->owning_controller_socket.
+tor_run_main() takes ownership of that descriptor (control_connection_add_
+local_fd -> tor_take_socket_ownership) and closes it in connection_free_all()
+when it shuts down; tor_main_configuration_free() then closes the same number
+again. In an embedding process (an iOS app with network, database and UI
+descriptors churning on other threads) the number can be reused in between,
+so the second close() silently closes an unrelated descriptor.
+
+Give tor its own dup() of the socket and remember it. tor still closes its
+copy on shutdown; tor_main_configuration_free() closes the original and only
+closes the duplicate if tor never claimed it (tor_run_main() not called or
+failed early), which it detects by checking that the number still refers to
+the same socket (fstat device and inode) instead of trusting the number.
+Windows keeps the previous behaviour.
+---
+--- a/src/feature/api/tor_api_internal.h	2026-10-19 12:23:05
++++ b/src/feature/api/tor_api_internal.h	2026-10-19 12:23:11
+@@ -29,6 +29,11 @@
+ 
+   /** Socket that Tor will use as an owning control socket. Owned. */
+   tor_socket_t owning_controller_socket;
++  /** Duplicate of owning_controller_socket whose number is passed to tor as
++   * __OwningControllerFD. tor_run_main() takes ownership of it and closes it
++   * on shutdown; tor_main_configuration_free() only closes it if tor never
++   * did (see there). TOR_INVALID_SOCKET if unused. */
++  tor_socket_t owning_controller_socket_for_tor;
+ };
+ 
+ #endif /* !defined(TOR_API_INTERNAL_H) */
+--- a/src/feature/api/tor_api.c	2026-10-19 12:22:10
++++ b/src/feature/api/tor_api.c	2026-10-19 12:23:48
+@@ -50,6 +50,9 @@
+ #ifdef HAVE_UNISTD_H
+ #include <unistd.h>
+ #endif
++#ifndef _WIN32
++#include <sys/stat.h>
++#endif
+ 
+ /**
+  * Helper: Add a copy of <b>arg</b> to the owned arguments of <b>cfg</b>.
+@@ -85,6 +88,7 @@
+   cfg->argv = (char **) fake_argv;
+ 
+   cfg->owning_controller_socket = TOR_INVALID_SOCKET;
++  cfg->owning_controller_socket_for_tor = TOR_INVALID_SOCKET;
+ 
+   return cfg;
+ }
+@@ -110,8 +114,25 @@
+   if (raw_socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) {
+     return INVALID_TOR_CONTROL_SOCKET;
+   }
++#ifndef _WIN32
++  /* tor_run_main() takes ownership of the descriptor named by
++   * __OwningControllerFD and closes it when it shuts down, while
++   * tor_main_configuration_free() closes cfg->owning_controller_socket.
++   * Handing tor its own duplicate makes each descriptor closed exactly once;
++   * without it the second close can hit an unrelated descriptor that the
++   * embedding process opened (and got the same number) in the meantime. */
++  tor_socket_t tor_side = dup(fds[1]);
++  if (tor_side < 0) {
++    raw_closesocket(fds[0]);
++    raw_closesocket(fds[1]);
++    return INVALID_TOR_CONTROL_SOCKET;
++  }
++  cfg->owning_controller_socket_for_tor = tor_side;
++#else
++  tor_socket_t tor_side = fds[1];
++#endif /* !defined(_WIN32) */
+   char buf[32];
+-  snprintf(buf, sizeof(buf), "%"PRIu64, (uint64_t)fds[1]);
++  snprintf(buf, sizeof(buf), "%"PRIu64, (uint64_t)tor_side);
+ 
+   cfg_add_owned_arg(cfg, "__OwningControllerFD");
+   cfg_add_owned_arg(cfg, buf);
+@@ -120,6 +141,30 @@
+   return fds[0];
+ }
+ 
++#ifndef _WIN32
++/** Close <b>cfg</b>'s duplicate of the owning controller socket if tor never
++ * took ownership of it (tor_run_main() not called, or it failed before
++ * opening the control connection). If tor did take it, tor has closed it and
++ * the number may since have been reused for an unrelated descriptor, so it is
++ * only closed when it still refers to the very same socket as
++ * cfg->owning_controller_socket (same device and inode). */
++static void
++cfg_close_unclaimed_tor_side_socket(tor_main_configuration_t *cfg)
++{
++  tor_socket_t tor_side = cfg->owning_controller_socket_for_tor;
++  cfg->owning_controller_socket_for_tor = TOR_INVALID_SOCKET;
++  if (!SOCKET_OK(tor_side) || !SOCKET_OK(cfg->owning_controller_socket))
++    return;
++  struct stat ours, theirs;
++  if (fstat(cfg->owning_controller_socket, &ours) < 0)
++    return;
++  if (fstat(tor_side, &theirs) < 0)
++    return; /* Already closed by tor. */
++  if (ours.st_dev == theirs.st_dev && ours.st_ino == theirs.st_ino)
++    raw_closesocket(tor_side);
++}
++#endif /* !defined(_WIN32) */
++
+ void
+ tor_main_configuration_free(tor_main_configuration_t *cfg)
+ {
+@@ -131,6 +176,9 @@
+     }
+     raw_free(cfg->argv_owned);
+   }
++#ifndef _WIN32
++  cfg_close_unclaimed_tor_side_socket(cfg);
++#endif
+   if (SOCKET_OK(cfg->owning_controller_socket)) {
+     raw_closesocket(cfg->owning_controller_socket);
+   }

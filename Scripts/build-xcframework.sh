@@ -37,6 +37,7 @@ TOR_URL="https://dist.torproject.org/tor-${TOR_VERSION}.tar.gz"
 # Resolve paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
+PATCH_DIR="${SCRIPT_DIR}/patches"
 BUILD_DIR="${PACKAGE_DIR}/.build-tor"
 OUTPUT_DIR="${BUILD_DIR}/output"
 XCFRAMEWORK_DIR="${PACKAGE_DIR}/TorClientC.xcframework"
@@ -352,14 +353,42 @@ build_libevent() {
 # A stub implementation is injected for ext_or_cmd functions that are
 # referenced by the protocol code but only implemented in the relay module.
 
+# Local patches applied on top of the pristine Tor tarball (see
+# Scripts/patches/*.patch; each file's header explains the bug and its
+# upstream status). The fingerprint is stored next to each libtor.a so a
+# cached build is redone whenever the patch set changes.
+tor_patches_fingerprint() {
+    local files=("${PATCH_DIR}"/*.patch)
+    if [ ! -e "${files[0]}" ]; then
+        echo "none"
+        return
+    fi
+    cat "${files[@]}" | shasum -a 256 | cut -d' ' -f1
+}
+
+apply_tor_patches() {
+    local files=("${PATCH_DIR}"/*.patch)
+    [ -e "${files[0]}" ] || return 0
+    for p in "${files[@]}"; do
+        log "  Applying $(basename "$p")"
+        patch -p1 --forward --silent < "$p" || {
+            log_err "Patch failed: $(basename "$p")"
+            return 1
+        }
+    done
+}
+
 build_tor() {
     local sdk_type="$1" subdir="$2"
     local out="${OUTPUT_DIR}/tor/${subdir}"
+    local fingerprint
+    fingerprint="$(tor_patches_fingerprint)"
 
-    if [ -f "$out/lib/libtor.a" ]; then
-        log "Tor ${subdir}: already built"
+    if [ -f "$out/lib/libtor.a" ] && [ "$(cat "$out/patches.sha256" 2>/dev/null)" = "$fingerprint" ]; then
+        log "Tor ${subdir}: already built (patch set ${fingerprint:0:12})"
         return
     fi
+    rm -rf "$out"
 
     log "Building Tor for ${subdir}..."
 
@@ -377,6 +406,7 @@ build_tor() {
     rm -rf "tor-${TOR_VERSION}"
     tar xzf "tor-${TOR_VERSION}.tar.gz"
     cd "tor-${TOR_VERSION}"
+    apply_tor_patches
 
     ./configure \
         --host=arm-apple-darwin \
@@ -456,6 +486,7 @@ STUB_EOF
     if [ -f "src/feature/api/tor_api.h" ]; then
         cp src/feature/api/tor_api.h "$out/include/tor_api.h"
     fi
+    echo "$fingerprint" > "$out/patches.sha256"
 
     cd ..
     rm -rf "tor-${TOR_VERSION}"
