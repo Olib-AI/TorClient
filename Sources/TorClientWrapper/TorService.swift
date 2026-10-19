@@ -22,6 +22,11 @@ public struct TorConfiguration: Sendable {
         case auto
         /// Use a specific port number
         case fixed(UInt16)
+        /// Listen on a Unix-domain socket at this absolute path instead of TCP, so no
+        /// other app on the device can reach the SOCKS port. The parent directory is
+        /// created with mode 0700 (Tor refuses a socket in a group/world-accessible
+        /// directory) and the socket is neither group- nor world-writable.
+        case unix(path: String)
 
         var torArgument: String {
             switch self {
@@ -29,8 +34,20 @@ public struct TorConfiguration: Sendable {
                 return "auto"
             case .fixed(let port):
                 return "\(port)"
+            case .unix(let path):
+                return "unix:\(path)"
             }
         }
+    }
+
+    /// Longest usable AF_UNIX path on Darwin: `sun_path` is 104 bytes including the NUL.
+    public static let maxUnixSocketPathLength = 103
+
+    /// Whether `path` can be bound as a Unix socket and passed to Tor unquoted.
+    public static func isUsableUnixSocketPath(_ path: String) -> Bool {
+        path.hasPrefix("/")
+            && path.utf8.count <= maxUnixSocketPathLength
+            && !path.utf8.contains(where: { $0 <= 0x20 || $0 == 0x22 || $0 == 0x5C || $0 >= 0x7F })
     }
 
     public init(
@@ -70,6 +87,69 @@ public struct TorConfiguration: Sendable {
         self.geoIPFile = geoIPFile
         self.geoIP6File = geoIP6File
         // Note: controlPort is ignored - we disable it to avoid port conflicts
+    }
+}
+
+// MARK: - SOCKS Socket Location
+
+/// Where the embedded Tor's SOCKS Unix socket lives.
+///
+/// The natural home, `<container>/Library/Caches/tor/socks.sock`, is 114 bytes on a
+/// device (`/private/var/mobile/Containers/Data/Application/<UUID>/` is 85), over the
+/// 103-byte `sun_path` limit. The app's own `tmp/` keeps the socket inside the sandbox
+/// (no other app can open it) and `<tmp>/tor/socks.sock` is 103 bytes: it fits. A
+/// shorter `<tmp>/t/s.sock` is the fallback should the container path ever grow.
+/// Simulator containers live under the Mac user's home and are far longer than any
+/// limit; there, and only there, a private 0700 directory under the host's /tmp is
+/// used (development only; the simulator has no app sandbox to protect anyway).
+public enum TorSocksSocketLocation {
+
+    /// Candidate socket paths in preference order.
+    public static func candidates(temporaryDirectory: URL) -> [String] {
+        let tmp = temporaryDirectory.standardizedFileURL.path
+        let base = tmp.hasSuffix("/") ? String(tmp.dropLast()) : tmp
+        var paths = ["\(base)/tor/socks.sock", "\(base)/t/s.sock"]
+        #if targetEnvironment(simulator)
+        paths.append("/tmp/sos-\(shortHash(base))/s.sock")
+        #endif
+        return paths
+    }
+
+    /// The first candidate that fits `sun_path`, or nil.
+    public static func plan(temporaryDirectory: URL = FileManager.default.temporaryDirectory) -> String? {
+        candidates(temporaryDirectory: temporaryDirectory).first(where: TorConfiguration.isUsableUnixSocketPath)
+    }
+
+    /// FNV-1a, 48 bits, hex: a stable per-container directory name.
+    static func shortHash(_ text: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01B3
+        }
+        return String(hash & 0xFFFF_FFFF_FFFF, radix: 16)
+    }
+
+    /// Creates the socket's directory as 0700 (fixing the mode if it exists) and removes
+    /// a stale socket file left by a crash. Throws if the directory is not ours.
+    public static func prepare(socketPath: String) throws {
+        let fileManager = FileManager.default
+        let directory = (socketPath as NSString).deletingLastPathComponent
+        if !fileManager.fileExists(atPath: directory) {
+            try fileManager.createDirectory(
+                atPath: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory)
+        let attributes = try fileManager.attributesOfItem(atPath: directory)
+        if let owner = attributes[.ownerAccountID] as? NSNumber, owner.uint32Value != getuid() {
+            throw TorError.configurationFailed("SOCKS socket directory is not owned by this app")
+        }
+        if fileManager.fileExists(atPath: socketPath) {
+            try fileManager.removeItem(atPath: socketPath)
+        }
     }
 }
 
@@ -139,7 +219,7 @@ public enum TorError: Error, Sendable {
 /// Uses OSAllocatedUnfairLock for Sendable compliance
 private final class TorOutputParserState: @unchecked Sendable {
     private struct State {
-        var socksPort: UInt16 = 0
+        var socksListener: TorSocksListener?
         var bootstrapProgress: Int = 0
         var isReady: Bool = false
         var errorMessage: String?
@@ -148,10 +228,10 @@ private final class TorOutputParserState: @unchecked Sendable {
     private let lock = NSLock()
     private var state = State()
 
-    var socksPort: UInt16 {
+    var socksListener: TorSocksListener? {
         lock.lock()
         defer { lock.unlock() }
-        return state.socksPort
+        return state.socksListener
     }
 
     var bootstrapProgress: Int {
@@ -172,10 +252,10 @@ private final class TorOutputParserState: @unchecked Sendable {
         return state.errorMessage
     }
 
-    func setSocksPort(_ port: UInt16) {
+    func setSocksListener(_ listener: TorSocksListener) {
         lock.lock()
         defer { lock.unlock() }
-        state.socksPort = port
+        state.socksListener = listener
     }
 
     func setBootstrapProgress(_ progress: Int) {
@@ -349,9 +429,17 @@ public actor TorService {
 
     /// The actual SOCKS port Tor bound to (discovered from stdout, refreshed
     /// from the control port by `reconnect()`). Returns 0 if not yet
-    /// discovered or while the network is disabled (the listener is closed).
+    /// discovered, while the network is disabled (the listener is closed), or
+    /// when Tor listens on a Unix socket (see `actualSocksListener`).
     public var actualSocksPort: UInt16 {
-        networkDisabled ? 0 : parserState.socksPort
+        networkDisabled ? 0 : (parserState.socksListener?.tcpPort ?? 0)
+    }
+
+    /// The SOCKS listener Tor opened (TCP or Unix socket), re-read from
+    /// `GETINFO net/listeners/socks` by `reconnect()`. nil if not yet
+    /// discovered or while the network is disabled.
+    public var actualSocksListener: TorSocksListener? {
+        networkDisabled ? nil : parserState.socksListener
     }
 
     /// Configure Tor with the specified settings
@@ -411,6 +499,15 @@ public actor TorService {
             }
         }
 
+        // A Unix-socket SOCKS listener needs a private (0700) directory and no stale
+        // socket file from a previous run.
+        if case .unix(let path) = config.socksPortMode {
+            guard TorConfiguration.isUsableUnixSocketPath(path) else {
+                throw TorError.configurationFailed("SOCKS socket path does not fit sun_path: \(path.utf8.count) bytes")
+            }
+            try TorSocksSocketLocation.prepare(socketPath: path)
+        }
+
         // Reset parser state for fresh start (prevents stale state from previous runs)
         parserState.reset()
         networkDisabled = false
@@ -453,7 +550,7 @@ public actor TorService {
 
         // Wait for port discovery (up to 10 seconds for initial startup)
         var attempts = 0
-        while parserState.socksPort == 0 && attempts < 100 {
+        while parserState.socksListener == nil && attempts < 100 {
             try await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
             attempts += 1
 
@@ -470,7 +567,7 @@ public actor TorService {
             }
         }
 
-        if parserState.socksPort == 0 {
+        if parserState.socksListener == nil {
             await abandonFailedStart(handle)
             throw TorError.startFailed("Timeout waiting for Tor to bind SOCKS port")
         }
@@ -521,7 +618,7 @@ public actor TorService {
         updateStatus(.idle)
     }
 
-    /// Get SOCKS proxy URL using the auto-discovered port
+    /// Get SOCKS proxy URL using the auto-discovered port (TCP listeners only)
     public var socksProxyURL: URL? {
         let port = actualSocksPort
         guard port > 0, _isRunning else { return nil }
@@ -669,8 +766,8 @@ public actor TorService {
                 onProgress?(progress)
                 if progress < 100 { updateStatus(.bootstrapping(progress: progress)) }
             }
-            if snapshot.isOnline, let port = snapshot.socksPorts.first {
-                parserState.setSocksPort(port)
+            if snapshot.isOnline, let listener = snapshot.socksListeners.first {
+                parserState.setSocksListener(listener)
                 parserState.setBootstrapProgress(100)
                 parserState.setReady(true)
                 updateStatus(.ready)
@@ -932,19 +1029,21 @@ public actor TorService {
         }
     }
 
+    /// The listener announced by an "Opened Socks listener ... (ready) on X" log line.
+    static func socksListener(fromLogLine line: String) -> TorSocksListener? {
+        guard line.contains("Opened Socks listener"), line.contains("ready"),
+              let on = line.range(of: " on ", options: .backwards) else { return nil }
+        let address = line[on.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        return TorSocksListener(listenerAddress: address)
+    }
+
     /// Parse Tor log output to extract port and bootstrap status
     private static func parseTorOutput(line: String, state: TorOutputParserState) {
-        // Parse SOCKS port binding
-        // Format: "[notice] Opened Socks listener connection (ready) on 127.0.0.1:XXXXX"
-        if line.contains("Opened Socks listener") && line.contains("ready") {
-            if let range = line.range(of: "127.0.0.1:") {
-                let portSubstring = line[range.upperBound...]
-                // Extract just the port number (stop at any non-digit)
-                let portStr = portSubstring.prefix(while: { $0.isNumber })
-                if let port = UInt16(portStr), port > 0 {
-                    state.setSocksPort(port)
-                }
-            }
+        // Parse SOCKS listener binding. Formats:
+        // "[notice] Opened Socks listener connection (ready) on 127.0.0.1:XXXXX"
+        // "[notice] Opened Socks listener connection (ready) on /path/to/socks.sock"
+        if let listener = socksListener(fromLogLine: line) {
+            state.setSocksListener(listener)
         }
 
         // Parse bootstrap progress

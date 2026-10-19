@@ -135,7 +135,9 @@ let torService = TorService.shared
 let dataDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("tor")
 let config = TorConfiguration(
     dataDirectory: dataDirectory,
-    socksPort: .auto,     // Let Tor pick an available port
+    // App-private Unix socket: no other app on the device can reach it (a TCP port on
+    // 127.0.0.1 is reachable by every app). Must fit sun_path (103 bytes).
+    socksPort: .unix(path: TorSocksSocketLocation.plan()!),
     clientOnly: true,     // No relay functionality
     avoidDiskWrites: true // Minimize disk I/O
 )
@@ -154,9 +156,9 @@ do {
         // Use with URLSession or other networking
     }
     
-    // Get the actual port Tor bound to
-    let port = await torService.actualSocksPort
-    print("Tor running on port: \(port)")
+    // The listener Tor actually opened (re-read after every reconnect)
+    let listener = await torService.actualSocksListener
+    print("Tor SOCKS listener: \(String(describing: listener))")
     
 } catch {
     print("Tor error: \(error)")
@@ -164,6 +166,10 @@ do {
 ```
 
 ### Using with URLSession
+
+URLSession cannot address a Unix-socket SOCKS proxy; with `.unix` route URLSession
+traffic through an in-app HTTP CONNECT proxy that speaks SOCKS5 to the socket (as
+StealthOS's LocalProxyServer does). With `.auto` / `.fixed` (TCP):
 
 ```swift
 let port = await torService.actualSocksPort
@@ -186,7 +192,7 @@ let (data, response) = try await session.data(from: url)
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
 | `dataDirectory` | `URL` | Required | Directory for Tor state files (keys, consensus, etc.) |
-| `socksPortMode` | `PortMode` | `.auto` | SOCKS5 port configuration |
+| `socksPortMode` | `PortMode` | `.auto` | SOCKS5 listener: `.auto`, `.fixed(port)` or `.unix(path:)` (app-private socket, directory created 0700, not group/world writable) |
 | `bridges` | `[String]` | `[]` | Bridge relay addresses for censored networks |
 | `clientOnly` | `Bool` | `true` | Disable relay/exit functionality |
 | `avoidDiskWrites` | `Bool` | `true` | Minimize disk I/O for privacy |
@@ -222,8 +228,11 @@ public var isRunning: Bool { get async }
 /// Whether Tor is ready to accept connections (running and bootstrapped)
 public var isReady: Bool { get async }
 
-/// The actual SOCKS port Tor bound to (0 if not yet discovered)
+/// The actual SOCKS port Tor bound to (0 if not yet discovered, or a Unix socket)
 public var actualSocksPort: UInt16 { get async }
+
+/// The SOCKS listener Tor opened, TCP or Unix socket (nil while disconnected)
+public var actualSocksListener: TorSocksListener? { get async }
 
 /// Current Tor status
 public var status: TorStatus { get async }
@@ -403,7 +412,7 @@ The Swift wrapper sets these Tor options automatically:
 
 ```
 --DataDirectory /path/to/tor        # State storage
---SocksPort auto                    # Auto port selection
+--SocksPort unix:/path | auto       # Unix socket (StealthOS) or auto port selection
 --ControlPort 0                     # Disable TCP control port (uses in-process socket instead)
 --ClientOnly 1                      # No relay functionality
 --DirCache 0                        # Disable directory cache

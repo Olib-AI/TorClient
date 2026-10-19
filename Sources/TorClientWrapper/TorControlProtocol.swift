@@ -376,19 +376,26 @@ public enum TorControlValue {
     /// Parses a GETINFO `net/listeners/socks` value: zero or more
     /// space-separated quoted `host:port` strings, e.g.
     /// `"127.0.0.1:9050" "[::1]:9050"`. `nil` on malformed input.
+    /// TCP listeners only; Unix-socket entries are skipped (see `socksListenerEntries`).
     public static func socksListeners(_ text: String) -> [(host: String, port: UInt16)]? {
+        guard let entries = socksListenerEntries(text) else { return nil }
+        return entries.compactMap { entry in
+            if case .tcp(let host, let port) = entry { return (host, port) }
+            return nil
+        }
+    }
+
+    /// Parses a GETINFO `net/listeners/socks` value into TCP and Unix-socket listeners,
+    /// e.g. `"127.0.0.1:9050" "unix:/path/to/socks.sock"`. `nil` on malformed input.
+    public static func socksListenerEntries(_ text: String) -> [TorSocksListener]? {
         var scanner = text.unicodeScalars[...]
-        var listeners: [(host: String, port: UInt16)] = []
+        var listeners: [TorSocksListener] = []
         while true {
             while scanner.first == " " { scanner.removeFirst() }
             if scanner.isEmpty { return listeners }
-            guard let entry = takeQuoted(&scanner) else { return nil }
-            guard let colon = entry.lastIndex(of: ":"),
-                  let port = UInt16(entry[entry.index(after: colon)...]), port > 0 else { return nil }
-            var host = String(entry[..<colon])
-            if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
-            guard !host.isEmpty else { return nil }
-            listeners.append((host, port))
+            guard let entry = takeQuoted(&scanner),
+                  let listener = TorSocksListener(listenerAddress: entry) else { return nil }
+            listeners.append(listener)
         }
     }
 
@@ -438,6 +445,56 @@ public enum TorControlValue {
     }
 }
 
+// MARK: - SOCKS Listener
+
+/// Where Tor's SOCKS listener accepts connections.
+public enum TorSocksListener: Sendable, Hashable, CustomStringConvertible {
+    case tcp(host: String, port: UInt16)
+    /// An AF_UNIX socket path. Only processes that can open the path (this app's
+    /// sandbox) can connect; unlike 127.0.0.1:<port> other apps cannot reach it.
+    case unix(path: String)
+
+    /// Parses one listener address as Tor prints it: `127.0.0.1:9050`, `[::1]:9050`,
+    /// `unix:/path` (GETINFO) or a bare absolute path (the "Opened Socks listener" log).
+    public init?(listenerAddress raw: String) {
+        let text = raw.trimmingCharacters(in: .whitespaces)
+        if text.hasPrefix("unix:") || text.hasPrefix("/") {
+            var path = text.hasPrefix("unix:") ? String(text.dropFirst("unix:".count)) : text
+            if path.count >= 2, path.hasPrefix("\""), path.hasSuffix("\"") {
+                path = String(path.dropFirst().dropLast())
+            }
+            guard path.hasPrefix("/"),
+                  path.utf8.count <= TorConfiguration.maxUnixSocketPathLength,
+                  !path.utf8.contains(0) else { return nil }
+            self = .unix(path: path)
+            return
+        }
+        guard let colon = text.lastIndex(of: ":"),
+              let port = UInt16(text[text.index(after: colon)...]), port > 0 else { return nil }
+        var host = String(text[..<colon])
+        if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
+        guard !host.isEmpty else { return nil }
+        self = .tcp(host: host, port: port)
+    }
+
+    public var tcpPort: UInt16? {
+        if case .tcp(_, let port) = self { return port }
+        return nil
+    }
+
+    public var unixPath: String? {
+        if case .unix(let path) = self { return path }
+        return nil
+    }
+
+    public var description: String {
+        switch self {
+        case .tcp(let host, let port): return host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
+        case .unix(let path): return "unix:\(path)"
+        }
+    }
+}
+
 // MARK: - Network State Snapshot
 
 /// What Tor reports about its network activity, gathered with one GETINFO.
@@ -451,10 +508,14 @@ public struct TorNetworkSnapshot: Sendable, Equatable {
     /// `status/bootstrap-phase` PROGRESS. Stays 100 once Tor has bootstrapped
     /// once, even while the network is disabled.
     public var bootstrapProgress: Int?
-    /// Open SOCKS listener ports (`net/listeners/socks`). `DisableNetwork=1`
-    /// closes every SOCKS listener; with `SocksPort auto` re-enabling the
-    /// network binds a NEW port.
-    public var socksPorts: [UInt16]
+    /// Open SOCKS listeners (`net/listeners/socks`), TCP or Unix socket.
+    /// `DisableNetwork=1` closes every SOCKS listener; re-enabling the network
+    /// opens them again (a NEW port with `SocksPort auto`, the same path for a
+    /// Unix socket).
+    public var socksListeners: [TorSocksListener]
+
+    /// TCP listener ports only.
+    public var socksPorts: [UInt16] { socksListeners.compactMap(\.tcpPort) }
 
     public static let getInfoKeys = [
         "status/circuit-established",
@@ -463,11 +524,21 @@ public struct TorNetworkSnapshot: Sendable, Equatable {
         "net/listeners/socks",
     ]
 
-    public init(circuitEstablished: Bool, networkLive: Bool, bootstrapProgress: Int?, socksPorts: [UInt16]) {
+    public init(circuitEstablished: Bool, networkLive: Bool, bootstrapProgress: Int?, socksListeners: [TorSocksListener]) {
         self.circuitEstablished = circuitEstablished
         self.networkLive = networkLive
         self.bootstrapProgress = bootstrapProgress
-        self.socksPorts = socksPorts
+        self.socksListeners = socksListeners
+    }
+
+    /// TCP listeners on 127.0.0.1 (kept for callers that only know ports).
+    public init(circuitEstablished: Bool, networkLive: Bool, bootstrapProgress: Int?, socksPorts: [UInt16]) {
+        self.init(
+            circuitEstablished: circuitEstablished,
+            networkLive: networkLive,
+            bootstrapProgress: bootstrapProgress,
+            socksListeners: socksPorts.map { .tcp(host: "127.0.0.1", port: $0) }
+        )
     }
 
     /// Interprets the GETINFO reply for `getInfoKeys`; `nil` if any value is
@@ -479,20 +550,20 @@ public struct TorNetworkSnapshot: Sendable, Equatable {
               let liveness = values["network-liveness"], liveness == "up" || liveness == "down",
               let phase = values["status/bootstrap-phase"],
               let listenersText = values["net/listeners/socks"],
-              let listeners = TorControlValue.socksListeners(listenersText) else { return nil }
+              let listeners = TorControlValue.socksListenerEntries(listenersText) else { return nil }
         self.circuitEstablished = circuit
         self.networkLive = liveness == "up"
         self.bootstrapProgress = TorControlValue.bootstrapProgress(phase)
-        self.socksPorts = listeners.map(\.port)
+        self.socksListeners = listeners
     }
 
     /// True when Tor is fully online and usable: a circuit exists and a SOCKS
     /// listener is open.
-    public var isOnline: Bool { circuitEstablished && !socksPorts.isEmpty }
+    public var isOnline: Bool { circuitEstablished && !socksListeners.isEmpty }
 
     /// True when the network is verifiably down from the client's point of
     /// view: no circuit and no SOCKS listener accepting connections.
-    public var isOffline: Bool { !circuitEstablished && socksPorts.isEmpty }
+    public var isOffline: Bool { !circuitEstablished && socksListeners.isEmpty }
 
     /// Progress to show while re-enabling the network. Tor's own bootstrap
     /// percentage is used while it is below 100; after a first successful
@@ -501,7 +572,7 @@ public struct TorNetworkSnapshot: Sendable, Equatable {
     public var reconnectProgress: Int {
         if isOnline { return 100 }
         if let progress = bootstrapProgress, progress < 100 { return max(5, min(progress, 99)) }
-        if socksPorts.isEmpty { return 10 }
+        if socksListeners.isEmpty { return 10 }
         return networkLive ? 75 : 50
     }
 }
