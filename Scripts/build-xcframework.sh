@@ -538,12 +538,15 @@ create_xcframework() {
             cp "${OUTPUT_DIR}/tor/${subdir}/include/tor_api.h" "$pdir/include/"
         fi
 
-        # Module map for Swift interop
+        # Module map for Swift interop. Deliberately no `link "TorClient"`:
+        # an autolink directive is copied into every object file of every
+        # module that (even transitively) imports TorClientC, so each of those
+        # images would ask for libTorClient.a again. SwiftPM links the binary
+        # target explicitly, into the TorClientWrapper product only.
         cat > "$pdir/include/module.modulemap" << 'MAPEOF'
 module TorClientC {
     header "tor_api.h"
     export *
-    link "TorClient"
 }
 MAPEOF
     done

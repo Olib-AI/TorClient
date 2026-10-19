@@ -407,8 +407,10 @@ public actor TorService {
     /// Whether `start()` may launch Tor again after `stop()` in the same
     /// process. True for TorClientC builds that carry
     /// Scripts/patches/0001-workqueue-per-pool-worker-accounting.patch (stale
-    /// thread-pool statics made the second shutdown abort) and
-    /// 0002-tor-api-owning-controller-socket-double-close.patch.
+    /// thread-pool statics made the second shutdown abort),
+    /// 0002-tor-api-owning-controller-socket-double-close.patch and
+    /// 0003-dispatch-naming-reset-on-shutdown.patch (stale pubsub name maps
+    /// made pubsub_install() abort after a few restarts).
     public static let supportsInProcessRestart = true
 
     /// Whether Tor is currently running

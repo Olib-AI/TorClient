@@ -1,5 +1,4 @@
 module TorClientC {
     header "tor_api.h"
     export *
-    link "TorClient"
 }

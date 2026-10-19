@@ -68,6 +68,7 @@ The build script will:
 |-------|-------|
 | `0001-workqueue-per-pool-worker-accounting.patch` | Function-level statics in `worker_thread_main()` survive `threadpool_free()`; the second `tor_run_main()` in a process then frees its CPU-worker pool while workers still run and aborts with "Error unlocking a mutex" |
 | `0002-tor-api-owning-controller-socket-double-close.patch` | `tor_main_configuration_free()` closed the owning-controller descriptor that `tor_run_main()` had already closed, which can close an unrelated descriptor in the embedding app |
+| `0003-dispatch-naming-reset-on-shutdown.patch` | The pubsub name maps (message/subsystem/channel/type name to ID) survive `tor_run_main()`, but their hashes use a siphash key that every run re-randomizes; after a few in-process restarts one name resolves to two IDs and `pubsub_install()` aborts |
 
 | Library | Version | Source |
 |---------|---------|--------|
@@ -392,7 +393,13 @@ TorClient/
 - **libevent 2.1.13**: Event notification library
 - **zlib 1.3.2**: Compression library
 
-All dependencies are statically linked - no dynamic frameworks required.
+All dependencies are statically linked into `libTorClient.a`, which is linked into
+exactly one image: the `TorClientWrapper` product is a **dynamic** library, so the app
+embeds `TorClientWrapper.framework` once and every framework, extension or test bundle
+that uses Tor binds to that single copy. Tor and OpenSSL keep process-wide globals;
+they must not be copied into several images. For the same reason the package declares
+no linker flags (they would propagate to every client) and the module map carries no
+`link` directive (it would ask every importing module's linker for the archive).
 
 ### How It Works
 
