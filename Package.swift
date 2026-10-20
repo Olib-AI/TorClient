@@ -50,6 +50,14 @@ let package = Package(
             dependencies: ["TorClientC"],
             path: "Sources/TorClientWrapper",
             swiftSettings: upcomingFeatures
+        ),
+        // iOS-only (the binary target has no macOS slice): run with
+        // `xcodebuild test -scheme TorClient -destination 'platform=iOS Simulator,name=iPhone Duo'`.
+        .testTarget(
+            name: "TorClientWrapperTests",
+            dependencies: ["TorClientWrapper"],
+            path: "Tests/TorClientWrapperTests",
+            swiftSettings: upcomingFeatures
         )
     ]
 )
