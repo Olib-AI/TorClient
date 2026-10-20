@@ -39,6 +39,14 @@ let package = Package(
                 // that are called by Tor but not directly referenced from Swift
                 .unsafeFlags(["-Xlinker", "-ObjC", "-Xlinker", "-all_load"])
             ]
+        ),
+        // iOS-only (the binary target has no macOS slice): run with
+        // `xcodebuild test -scheme TorClient -destination 'platform=iOS Simulator,name=iPhone Duo'`.
+        .testTarget(
+            name: "TorClientWrapperTests",
+            dependencies: ["TorClientWrapper"],
+            path: "Tests/TorClientWrapperTests",
+            swiftSettings: upcomingFeatures
         )
     ]
 )

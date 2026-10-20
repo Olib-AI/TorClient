@@ -429,7 +429,7 @@ The Swift wrapper sets these Tor options automatically:
 
 ### "Tor exited with code X"
 
-Check the console logs for Tor's error messages. Common causes:
+The wrapper logs through unified logging (subsystem `ai.olib.stealthos.torclient`, categories `TorService` and `TorThread`); reply text and anything that may identify the user is `.private`, and Tor's command line is never logged because it can carry upstream-proxy credentials. Stream it with `log stream --level debug --predicate 'subsystem == "ai.olib.stealthos.torclient"'`. Common causes:
 - Invalid data directory permissions
 - Missing GeoIP files (optional, but Tor may warn)
 - Network connectivity issues

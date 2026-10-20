@@ -259,7 +259,7 @@ public enum TorControlSignal: String, Sendable, CaseIterable {
 
 /// One `key=value` assignment for SETCONF. A `nil` value resets the option
 /// to its default.
-public struct TorConfigSetting: Sendable, Equatable {
+public struct TorConfigSetting: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     public let key: String
     public let value: String?
 
@@ -267,12 +267,19 @@ public struct TorConfigSetting: Sendable, Equatable {
         self.key = key
         self.value = value
     }
+
+    /// Key only: values (proxy credentials, bridge lines, paths) stay out of logs.
+    public var description: String { value == nil ? "\(key) (reset)" : "\(key)=<redacted>" }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror { Mirror(self, children: ["key": key], displayStyle: .struct) }
 }
 
 /// A single, validated control-port command line. Instances can only be
 /// created through the factory methods, which reject any input that could
 /// smuggle a second command (CR/LF) or otherwise corrupt the line.
-public struct TorControlCommand: Sendable, Equatable, CustomStringConvertible {
+public struct TorControlCommand: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     /// The command line without its CRLF terminator.
     public let line: String
     /// The command verb (e.g. `SETCONF`), safe to log.
@@ -292,6 +299,11 @@ public struct TorControlCommand: Sendable, Equatable, CustomStringConvertible {
 
     /// Verb only: argument values (config paths, bridge lines) stay out of logs.
     public var description: String { verb }
+
+    public var debugDescription: String { verb }
+
+    /// `dump()` and debugger summaries see the verb only, never `line`.
+    public var customMirror: Mirror { Mirror(self, children: ["verb": verb], displayStyle: .struct) }
 
     public static func signal(_ signal: TorControlSignal) -> TorControlCommand {
         // Fixed uppercase alphabet from the enum: nothing to validate.

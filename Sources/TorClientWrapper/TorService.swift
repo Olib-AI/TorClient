@@ -4,6 +4,7 @@
 
 import Foundation
 import TorClientC
+import os
 
 // MARK: - Tor Configuration
 
@@ -907,12 +908,13 @@ public actor TorService {
         do {
             let reply = try await control.execute(.signal(.newnym), timeout: .seconds(10))
             guard reply.isSuccess else {
-                print("[TorService] NEWNYM rejected: \(reply.statusCode) \(reply.message)")
+                TorLog.service.error("NEWNYM rejected: \(reply.statusCode, privacy: .public) \(reply.message, privacy: .private)")
                 throw TorError.controlSocketFailed
             }
-            print("[TorService] NEWNYM sent successfully: \(reply.statusCode) \(reply.message)")
+            TorLog.service.info("NEWNYM accepted: \(reply.statusCode, privacy: .public)")
+            TorLog.service.debug("NEWNYM reply: \(reply.message, privacy: .private)")
         } catch let error as TorControlError {
-            print("[TorService] NEWNYM failed: \(error.localizedDescription)")
+            TorLog.service.error("NEWNYM failed: \(error.localizedDescription, privacy: .private)")
             throw TorError.controlSocketFailed
         }
     }
@@ -1179,12 +1181,11 @@ public actor TorService {
         var exitCode: Int32 = -1
         defer { handle.markExited(exitCode) }
 
-        // DIAGNOSTIC: Log thread start
-        print("[TorService] TOR THREAD STARTING - thread: \(Thread.current.name ?? "unnamed")")
+        TorLog.thread.debug("Tor thread starting: \(Thread.current.name ?? "unnamed", privacy: .public)")
 
         guard let cfg = tor_main_configuration_new() else {
             parserState.setError("Failed to create Tor configuration")
-            print("[TorService] TOR THREAD ERROR - failed to create configuration")
+            TorLog.thread.error("Failed to create the Tor configuration")
             return
         }
 
@@ -1204,8 +1205,7 @@ public actor TorService {
             tor_main_configuration_free(cfg)
             for index in 0..<argc { free(argv[index]) }
             argv.deallocate()
-            // DIAGNOSTIC: Log thread exit
-            print("[TorService] TOR THREAD EXITING - configuration freed")
+            TorLog.thread.debug("Tor thread exiting: configuration freed")
         }
 
         // Redirect stdout/stderr to our pipes
@@ -1229,27 +1229,50 @@ public actor TorService {
         // and closing our end makes Tor exit.
         let controlFD = tor_main_configuration_setup_control_socket(cfg)
         if controlFD != INVALID_TOR_CONTROL_SOCKET {
-            print("[TorService] Control socket created: fd=\(controlFD)")
+            TorLog.thread.debug("Control socket created: fd=\(controlFD, privacy: .public)")
             control.attach(controlFD)
         } else {
-            print("[TorService] WARNING: Failed to create control socket — NEWNYM/disconnect will not work")
+            TorLog.thread.error("Failed to create the control socket: NEWNYM and disconnect will not work")
         }
 
         _ = tor_main_configuration_set_command_line(cfg, Int32(argc), argv)
 
-        // DIAGNOSTIC: Log before tor_run_main
-        print("[TorService] TOR THREAD - calling tor_run_main()")
+        // Never log `arguments`/argv: they can carry proxy credentials.
+        TorLog.thread.debug("Calling tor_run_main()")
 
         // This blocks until Tor exits
         let result = tor_run_main(cfg)
         exitCode = result
 
-        // DIAGNOSTIC: Log tor_run_main exit
-        print("[TorService] TOR THREAD - tor_run_main() returned with code \(result)")
+        TorLog.thread.debug("tor_run_main() returned \(result, privacy: .public)")
 
         if result != 0 {
             parserState.setError("Tor exited with code \(result)")
-            print("[TorService] TOR THREAD ERROR - Tor exited with code \(result)")
+            TorLog.thread.error("Tor exited with code \(result, privacy: .public)")
         }
     }
+}
+
+// MARK: - Redacted Descriptions
+
+/// An upstream proxy carries the user's proxy host and credentials. Its
+/// description, debug description and mirror (what `print`, `dump`,
+/// `String(describing:)` and the description of an enclosing
+/// `TorConfiguration` use) name only the proxy kind and whether it
+/// authenticates, so an accidental log line cannot leak them.
+extension TorConfiguration.UpstreamProxy: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        switch self {
+        case .httpConnect(_, _, let username, _):
+            return "UpstreamProxy.httpConnect(<redacted>, authenticated: \(!(username ?? "").isEmpty))"
+        case .socks5(_, _, let username, _):
+            return "UpstreamProxy.socks5(<redacted>, authenticated: \(!(username ?? "").isEmpty))"
+        case .socks4:
+            return "UpstreamProxy.socks4(<redacted>)"
+        }
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror { Mirror(self, children: [Mirror.Child](), displayStyle: .enum) }
 }
