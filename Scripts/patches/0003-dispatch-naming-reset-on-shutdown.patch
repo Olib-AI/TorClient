@@ -1,0 +1,101 @@
+From: StealthOS TorClient <opensource@olib.ai>
+Subject: [PATCH 3/3] dispatch: forget pubsub names when Tor shuts down
+Upstream-Status: candidate (not yet submitted)
+Applies-To: tor 0.4.9.14
+
+The four dispatch namemaps (message, subsystem, channel and message-type
+names -> 16-bit IDs) in dispatch_naming.c are file-level statics that nothing
+ever frees. They are hash tables keyed with siphash24g(), and that key is
+discarded by crypto_global_cleanup() and re-randomized by the next
+crypto_global_init(). After an in-process tor_run_main() restart every entry
+of the previous run is filed under a hash the new run can no longer compute.
+
+HT_FIND() only compares names inside the bucket the new hash selects (the
+cached hash is not compared), so a lookup of an old name either misses and
+allocates a duplicate ID, or, when the new hash happens to land in the stale
+entry's bucket, returns the stale ID. HT_INSERT() growth then re-buckets the
+table in the middle of pubsub_install(), so one name can resolve to two IDs
+within a single run: a publisher and its subscriber end up on different
+message IDs, pubsub_builder_check() fails ("has publishers, but no
+subscribers"; not visible because logging is not configured yet), and
+
+  pubsub_install() -> tor_assert(r == 0) -> tor_abort_()
+
+The tables also grow by ~5 messages, 2 subsystems and 2 channels per run.
+
+Reproduced on macOS with Tor built from this tarball (+0001, +0002) and
+AddressSanitizer: an in-process start/HALT loop aborted in pubsub_install()
+in 9 of 10 seeded 100-cycle runs (first abort on the 7th tor_run_main()),
+which matches the iOS simulator crash on the 6th restart. With this patch:
+10 x 100 and 1 x 400 cycles clean under ASan, and the ID counts read 0 after
+every shutdown.
+
+Clear the maps in tor_free_all(), right after the dispatcher and the publish
+bindings are gone, restoring their static initial state so each run builds
+its IDs under its own siphash key.
+---
+--- a/src/lib/dispatch/dispatch_naming.h
++++ b/src/lib/dispatch/dispatch_naming.h
+@@ -47,5 +47,6 @@
+ size_t get_num_msg_type_ids(void);
+ 
+ void dispatch_naming_init(void);
++void dispatch_naming_free_all(void);
+ 
+ #endif /* !defined(TOR_DISPATCH_NAMING_H) */
+--- a/src/lib/dispatch/dispatch_naming.c
++++ b/src/lib/dispatch/dispatch_naming.c
+@@ -38,6 +38,34 @@
+ {
+ }
+ 
++/** Release <b>map</b> and restore its static initial state. */
++static void
++dispatch_naming_reset(namemap_t *map)
++{
++  const namemap_t empty = NAMEMAP_INIT();
++  namemap_clear(map);
++  *map = empty;
++}
++
++/**
++ * Forget every message, subsystem, channel and message-type name.
++ *
++ * The maps are hash tables keyed with siphash24g(), whose key is discarded
++ * by crypto_global_cleanup() and re-randomized on the next initialization.
++ * Entries that survive an in-process tor_run_main() restart are filed under
++ * hashes the next run cannot compute, so the same name can resolve to two
++ * different IDs within one run and pubsub_install() fails. Call this once
++ * the dispatcher is gone, so that each run starts with empty maps.
++ **/
++void
++dispatch_naming_free_all(void)
++{
++  dispatch_naming_reset(&message_id_map);
++  dispatch_naming_reset(&subsys_id_map);
++  dispatch_naming_reset(&channel_id_map);
++  dispatch_naming_reset(&msg_type_id_map);
++}
++
+ #ifndef COCCI
+ /* Helper macro: declare functions to map IDs to and from names for a given
+  * type in a namemap_t.
+--- a/src/app/main/shutdown.c
++++ b/src/app/main/shutdown.c
+@@ -50,6 +50,7 @@
+ #include "feature/stats/bwhist.h"
+ #include "feature/stats/geoip_stats.h"
+ #include "feature/stats/rephist.h"
++#include "lib/dispatch/dispatch_naming.h"
+ #include "lib/evloop/compat_libevent.h"
+ #include "lib/geoip/geoip.h"
+ 
+@@ -158,6 +159,8 @@
+   /* stuff in main.c */
+ 
+   tor_mainloop_disconnect_pubsub();
++  /* After the dispatcher: nothing looks names up any more. */
++  dispatch_naming_free_all();
+ 
+   if (!postfork) {
+     release_lockfile();

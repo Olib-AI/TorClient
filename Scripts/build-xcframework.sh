@@ -692,12 +692,15 @@ combine_slice() {
     cp -r "${OUTPUT_DIR}/libevent/${subdir}/include/event2/"* "$pdir/include/event2/"
     cp "${OUTPUT_DIR}/tor/${subdir}/include/tor_api.h" "$pdir/include/"
 
-    # Module map for Swift interop
+    # Module map for Swift interop. Deliberately no `link "TorClient"`:
+    # an autolink directive is copied into every object file of every
+    # module that (even transitively) imports TorClientC, so each of those
+    # images would ask for libTorClient.a again. SwiftPM links the binary
+    # target explicitly, into the TorClientWrapper product only.
     cat > "$pdir/include/module.modulemap" << 'MAPEOF'
 module TorClientC {
     header "tor_api.h"
     export *
-    link "TorClient"
 }
 MAPEOF
 }
