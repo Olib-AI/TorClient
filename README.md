@@ -94,6 +94,7 @@ line in `sources.lock` and the file in `signatures/` (see the comments in
 | `0001-workqueue-per-pool-worker-accounting.patch` | Function-level statics in `worker_thread_main()` survive `threadpool_free()`; the second `tor_run_main()` in a process then frees its CPU-worker pool while workers still run and aborts with "Error unlocking a mutex" |
 | `0002-tor-api-owning-controller-socket-double-close.patch` | `tor_main_configuration_free()` closed the owning-controller descriptor that `tor_run_main()` had already closed, which can close an unrelated descriptor in the embedding app |
 | `0003-dispatch-naming-reset-on-shutdown.patch` | The pubsub name maps (message/subsystem/channel/type name to ID) survive `tor_run_main()`, but their hashes use a siphash key that every run re-randomizes; after a few in-process restarts one name resolves to two IDs and `pubsub_install()` aborts |
+| `0004-time-fmt-arithmetic-timegm-on-apple.patch` | `tor_timegm()` used the system `timegm()`, a notifyd IPC per call in the iOS simulator; reloading a cached consensus (~8000 calls, before the main loop runs) left the control port silent for 5-10 s after every start, so `GETINFO` / `SIGNAL` right after `start()` timed out |
 
 | Library | Version | Source |
 |---------|---------|--------|
