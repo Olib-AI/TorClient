@@ -1,0 +1,58 @@
+From: StealthOS TorClient <opensource@olib.ai>
+Subject: [PATCH 4/4] time_fmt: use the arithmetic tor_timegm() on Apple platforms
+Upstream-Status: candidate (not yet submitted)
+Applies-To: tor 0.4.9.14
+
+tor_timegm() calls the system timegm() when configure finds one. On Apple
+platforms every timegm() goes through gmtsub() -> notify_check_tz(). On
+macOS and iOS devices that check reads a shared-memory notify token, but in
+the iOS simulator it is a Mach IPC round trip to the simulator's notifyd:
+10000 x timegm() took 8.2 s in the iPhone simulator (iOS 27.1) and 33 ms
+on the host macOS.
+
+run_tor_main_loop() reloads the cached consensus before the event loop
+starts, and routerstatus_parse_entry_from_string() parses one ISO time per
+router status entry (parse_iso_time_() -> tor_timegm()), ~8000 calls. A
+`sample` of the Tor thread during a restart shows 93% of its time in
+router_reload_consensus_networkstatus -> ... -> parse_iso_time_ -> time2 ->
+notify_check_tz -> mach_msg. So every in-process restart with a cached
+consensus kept Tor out of its main loop for ~5 s (more under load). The
+owning controller connection is not serviced until the loop runs, so a
+GETINFO or SIGNAL right after start() timed out (StealthOS's 100-restart
+stress test: GETINFO took 5.0-5.3 s on every cycle once the consensus was
+cached, and failed its 10 s timeout under concurrent test load; SIGNAL HALT
+in stop() ran into its 5 s timeout).
+
+Use tor_timegm_impl(), the implementation Tor already uses where timegm()
+is missing, on __APPLE__. Apple's time_t does not count leap seconds, so the
+result is identical for every valid input; the only difference is that
+out-of-range fields (e.g. April 31) are rejected instead of normalized, and
+every caller passes fields it has range-checked or got from gmtime().
+---
+--- a/src/lib/encoding/time_fmt.c
++++ b/src/lib/encoding/time_fmt.c
+@@ -170,7 +170,7 @@
+ int
+ tor_timegm(const struct tm *tm, time_t *time_out)
+ {
+-#ifdef HAVE_TIMEGM
++#if defined(HAVE_TIMEGM) && !defined(__APPLE__)
+   /* If the system gives us a timegm(), use it: if the system's time_t
+    * includes leap seconds, then we can hope that its timegm() knows too.
+    *
+@@ -188,7 +188,14 @@
+     return 0;
+   }
+ #else
+-  /* The system doesn't have timegm; we'll have to use our own. */
++  /* The system doesn't have timegm; we'll have to use our own.
++   *
++   * Apple platforms have timegm(), but every call goes through
++   * notify_check_tz(), which in the iOS simulator is a Mach IPC round trip
++   * to notifyd (about 0.8 ms). Loading a cached consensus calls this once
++   * per router status entry, so the main loop started seconds late and the
++   * control port did not answer meanwhile. Apple's time_t has no leap
++   * seconds, so the arithmetic implementation gives the same result. */
+   return tor_timegm_impl(tm, time_out);
+ #endif
+ }
