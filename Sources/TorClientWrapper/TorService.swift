@@ -15,6 +15,66 @@ public struct TorConfiguration: Sendable {
     public var avoidDiskWrites: Bool
     public var geoIPFile: URL?
     public var geoIP6File: URL?
+    /// The proxy Tor's own connections (to guards and bridges) go through, when the user
+    /// has one configured. Nil: Tor connects directly.
+    public var upstreamProxy: UpstreamProxy?
+
+    /// An outbound proxy for Tor itself (torrc `HTTPSProxy` / `Socks5Proxy` / `Socks4Proxy`).
+    public enum UpstreamProxy: Sendable, Equatable {
+        /// An HTTP proxy that supports CONNECT (`HTTPSProxy`; Tor speaks plain HTTP to it).
+        case httpConnect(host: String, port: UInt16, username: String?, password: String?)
+        case socks5(host: String, port: UInt16, username: String?, password: String?)
+        case socks4(host: String, port: UInt16)
+
+        /// `host:port` with IPv6 literals bracketed. Nil when the host could break a torrc
+        /// value (empty, whitespace, quotes, brackets inside a name).
+        var address: String? {
+            let (host, port): (String, UInt16) = switch self {
+            case .httpConnect(let host, let port, _, _), .socks5(let host, let port, _, _): (host, port)
+            case .socks4(let host, let port): (host, port)
+            }
+            guard port > 0, !host.isEmpty, host.utf8.count <= 255,
+                  host.utf8.allSatisfy({ $0 > 0x20 && $0 < 0x7F && $0 != 0x22 && $0 != 0x5C && $0 != 0x5B && $0 != 0x5D }) else {
+                return nil
+            }
+            return host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
+        }
+
+        /// Every torrc option that selects an upstream proxy, set for this one and reset
+        /// (nil) for the others, so a change never leaves a stale proxy behind. Nil when
+        /// the proxy cannot be expressed.
+        public var settings: [TorConfigSetting]? {
+            guard let address else { return nil }
+            var values: [String: String?] = [
+                "HTTPSProxy": nil, "HTTPSProxyAuthenticator": nil,
+                "Socks5Proxy": nil, "Socks5ProxyUsername": nil, "Socks5ProxyPassword": nil,
+                "Socks4Proxy": nil,
+            ]
+            switch self {
+            case .httpConnect(_, _, let username, let password):
+                values["HTTPSProxy"] = address
+                if let username, !username.isEmpty {
+                    guard !username.contains(":"), username.utf8.count <= 255, (password ?? "").utf8.count <= 255 else { return nil }
+                    values["HTTPSProxyAuthenticator"] = "\(username):\(password ?? "")"
+                }
+            case .socks5(_, _, let username, let password):
+                values["Socks5Proxy"] = address
+                if let username, !username.isEmpty {
+                    guard let password, !password.isEmpty, username.utf8.count <= 255, password.utf8.count <= 255 else { return nil }
+                    values["Socks5ProxyUsername"] = username
+                    values["Socks5ProxyPassword"] = password
+                }
+            case .socks4:
+                values["Socks4Proxy"] = address
+            }
+            return values.keys.sorted().map { TorConfigSetting($0, values[$0] ?? nil) }
+        }
+    }
+
+    /// No upstream proxy: every proxy option reset.
+    public static let noUpstreamProxySettings: [TorConfigSetting] = [
+        "HTTPSProxy", "HTTPSProxyAuthenticator", "Socks4Proxy", "Socks5Proxy", "Socks5ProxyPassword", "Socks5ProxyUsername",
+    ].map { TorConfigSetting($0, nil) }
 
     /// Port configuration mode
     public enum PortMode: Sendable, Equatable {
@@ -57,7 +117,8 @@ public struct TorConfiguration: Sendable {
         clientOnly: Bool = true,
         avoidDiskWrites: Bool = true,
         geoIPFile: URL? = nil,
-        geoIP6File: URL? = nil
+        geoIP6File: URL? = nil,
+        upstreamProxy: UpstreamProxy? = nil
     ) {
         self.dataDirectory = dataDirectory
         self.socksPortMode = socksPort
@@ -66,6 +127,7 @@ public struct TorConfiguration: Sendable {
         self.avoidDiskWrites = avoidDiskWrites
         self.geoIPFile = geoIPFile
         self.geoIP6File = geoIP6File
+        self.upstreamProxy = upstreamProxy
     }
 
     /// Convenience initializer for fixed port (backwards compatibility)
@@ -806,6 +868,23 @@ public actor TorService {
         return reply
     }
 
+    // MARK: - Upstream Proxy
+
+    /// Switches the proxy Tor itself uses, on the running daemon (SETCONF). Nil removes it.
+    /// Throws `TorError.configurationFailed`-style errors when the proxy cannot be
+    /// expressed, `TorError.notRunning` when Tor is not running.
+    public func applyUpstreamProxy(_ proxy: TorConfiguration.UpstreamProxy?) async throws {
+        let settings: [TorConfigSetting]
+        if let proxy {
+            guard let proxySettings = proxy.settings else { throw TorControlError.verificationFailed("Unusable upstream proxy") }
+            settings = proxySettings
+        } else {
+            settings = TorConfiguration.noUpstreamProxySettings
+        }
+        _ = try await sendControlCommand(try TorControlCommand.setConf(settings))
+        configuration?.upstreamProxy = proxy
+    }
+
     // MARK: - Circuit Control
 
     /// Send SIGNAL NEWNYM to Tor via the control socket to request a new circuit (new identity).
@@ -907,6 +986,11 @@ public actor TorService {
     }
 
     private func buildArguments(from config: TorConfiguration) -> [String] {
+        Self.arguments(for: config)
+    }
+
+    /// Tor's command line for `config`. Carries proxy credentials: never log it.
+    public static func arguments(for config: TorConfiguration) -> [String] {
         var args: [String] = ["tor"] // argv[0]
 
         args.append("--DataDirectory")
@@ -952,6 +1036,15 @@ public actor TorService {
             for bridge in config.bridges {
                 args.append("--Bridge")
                 args.append(bridge)
+            }
+        }
+
+        // The user's own proxy, for Tor's connections to its guards / bridges.
+        if let settings = config.upstreamProxy?.settings {
+            for setting in settings {
+                guard let value = setting.value else { continue }
+                args.append("--\(setting.key)")
+                args.append(value)
             }
         }
 
