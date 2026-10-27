@@ -99,7 +99,7 @@ line in `sources.lock` and the file in `signatures/` (see the comments in
 | Library | Version | Source |
 |---------|---------|--------|
 | Tor | 0.4.9.14 | https://dist.torproject.org/ |
-| OpenSSL | 4.0.3 | https://github.com/openssl/openssl |
+| OpenSSL | 4.1.0 | https://github.com/openssl/openssl |
 | libevent | 2.1.13-stable | https://github.com/libevent/libevent |
 | zlib | 1.3.2 | https://zlib.net/ |
 
@@ -423,7 +423,7 @@ matching half of the fat archive. Apps that build arm64 only are unaffected.
 
 `libTorClient.a` is a combined static library containing:
 - **Tor 0.4.9.14**: The Onion Router (client-only build)
-- **OpenSSL 4.0.3**: Cryptographic library
+- **OpenSSL 4.1.0**: Cryptographic library
 - **libevent 2.1.13**: Event notification library
 - **zlib 1.3.2**: Compression library
 

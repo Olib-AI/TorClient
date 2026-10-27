@@ -14,7 +14,7 @@ PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
 CACHE="${TORCLIENT_BUILD_DIR:-${PACKAGE_DIR}/.build-tor}"
 REAL_SC="${SCRIPT_DIR}/supply-chain"
 
-TARBALLS="zlib-1.3.2.tar.gz openssl-4.0.3.tar.gz libevent-2.1.13-stable.tar.gz tor-0.4.9.14.tar.gz"
+TARBALLS="zlib-1.3.2.tar.gz openssl-4.1.0.tar.gz libevent-2.1.13-stable.tar.gz tor-0.4.9.14.tar.gz"
 for t in $TARBALLS; do
     [ -f "$CACHE/$t" ] || { echo "missing $CACHE/$t; run Scripts/build-xcframework.sh --sources-only first"; exit 2; }
 done
@@ -60,11 +60,11 @@ else
     fail "tampered cached tarball was modified or removed"
 fi
 
-fresh_file openssl-4.0.3.tar.gz
-cp "$WORK/files/openssl-4.0.3.tar.gz" "$WORK/files/openssl-4.0.4.tar.gz"
-expect_reject "tarball that is not pinned is rejected" lib sc_verify "$WORK/files/openssl-4.0.4.tar.gz"
+fresh_file openssl-4.1.0.tar.gz
+cp "$WORK/files/openssl-4.1.0.tar.gz" "$WORK/files/openssl-4.1.1.tar.gz"
+expect_reject "tarball that is not pinned is rejected" lib sc_verify "$WORK/files/openssl-4.1.1.tar.gz"
 expect_reject "download of a tarball that is not pinned is refused" \
-    lib sc_fetch "https://invalid.example/openssl-4.0.4.tar.gz" "$WORK/files/new/openssl-4.0.4.tar.gz"
+    lib sc_fetch "https://invalid.example/openssl-4.1.1.tar.gz" "$WORK/files/new/openssl-4.1.1.tar.gz"
 
 fresh_sc
 sed -i '' -E 's/^(libevent-2\.1\.13-stable\.tar\.gz[[:space:]]+)f/\10/' "$WORK/sc/sources.lock"
@@ -110,16 +110,16 @@ for t in $TARBALLS; do cp -c "$CACHE/$t" "$E2E/$t" 2>/dev/null || cp "$CACHE/$t"
 expect_ok "build accepts the pristine pinned tarballs" \
     env TORCLIENT_BUILD_DIR="$E2E" "$SCRIPT_DIR/build-xcframework.sh" --sources-only
 
-printf 'x' >> "$E2E/openssl-4.0.3.tar.gz"
+printf 'x' >> "$E2E/openssl-4.1.0.tar.gz"
 expect_reject "build ABORTS on a tampered cached openssl tarball" \
     env TORCLIENT_BUILD_DIR="$E2E" "$SCRIPT_DIR/build-xcframework.sh" --sources-only
-if grep -q 'SHA-256 mismatch for openssl-4.0.3.tar.gz' "$WORK/out" \
+if grep -q 'SHA-256 mismatch for openssl-4.1.0.tar.gz' "$WORK/out" \
    && ! grep -q 'All sources verified' "$WORK/out"; then
     pass "abort names the tampered file and no later step ran"
 else
     fail "abort message missing or build continued"; sed 's/^/      /' "$WORK/out"
 fi
-if [ ! -d "$E2E/openssl-4.0.3" ] && [ ! -d "$E2E/output" ]; then
+if [ ! -d "$E2E/openssl-4.1.0" ] && [ ! -d "$E2E/output" ]; then
     pass "nothing was extracted or built from the tampered tarball"
 else
     fail "build directory shows extraction/build after tamper"
