@@ -1,7 +1,7 @@
 From: StealthOS TorClient <opensource@olib.ai>
 Subject: [PATCH 4/4] time_fmt: use the arithmetic tor_timegm() on Apple platforms
 Upstream-Status: candidate (not yet submitted)
-Applies-To: tor 0.4.9.14
+Applies-To: tor 0.4.9.15
 
 tor_timegm() calls the system timegm() when configure finds one. On Apple
 platforms every timegm() goes through gmtsub() -> notify_check_tz(). On

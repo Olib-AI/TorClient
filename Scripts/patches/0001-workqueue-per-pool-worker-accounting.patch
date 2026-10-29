@@ -1,7 +1,7 @@
 From: StealthOS TorClient <opensource@olib.ai>
 Subject: [PATCH 1/2] workqueue: keep worker start/exit accounting per pool
 Upstream-Status: candidate (not yet submitted)
-Applies-To: tor 0.4.9.14
+Applies-To: tor 0.4.9.15
 
 worker_thread_main() tracked the number of running worker threads and the
 thread that holds pool->control_lock in two function-level statics. They are

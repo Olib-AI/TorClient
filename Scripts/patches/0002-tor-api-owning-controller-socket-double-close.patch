@@ -1,7 +1,7 @@
 From: StealthOS TorClient <opensource@olib.ai>
 Subject: [PATCH 2/2] tor_api: stop double-closing the owning controller socket
 Upstream-Status: candidate (not yet submitted)
-Applies-To: tor 0.4.9.14
+Applies-To: tor 0.4.9.15
 
 tor_main_configuration_setup_control_socket() passes fds[1] to tor as
 __OwningControllerFD and also stores it in cfg->owning_controller_socket.

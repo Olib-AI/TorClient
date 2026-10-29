@@ -1,7 +1,7 @@
 From: StealthOS TorClient <opensource@olib.ai>
 Subject: [PATCH 3/3] dispatch: forget pubsub names when Tor shuts down
 Upstream-Status: candidate (not yet submitted)
-Applies-To: tor 0.4.9.14
+Applies-To: tor 0.4.9.15
 
 The four dispatch namemaps (message, subsystem, channel and message-type
 names -> 16-bit IDs) in dispatch_naming.c are file-level statics that nothing

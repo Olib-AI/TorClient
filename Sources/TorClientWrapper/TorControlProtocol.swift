@@ -21,7 +21,7 @@ public struct TorControlReplyLine: Sendable, Equatable {
 
     public let statusCode: Int
     public let kind: Kind
-    /// Text after the separator, e.g. `version=0.4.9.14` or `OK`.
+    /// Text after the separator, e.g. `version=0.4.9.15` or `OK`.
     public let text: String
     /// Lines of the data block for `.data` lines (dot-unstuffed, terminator
     /// removed). Always empty for `.mid` and `.end`.
