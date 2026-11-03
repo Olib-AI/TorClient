@@ -437,7 +437,7 @@ no linker flags (they would propagate to every client) and the module map carrie
 
 ### How It Works
 
-1. **Initialization**: `TorService.configure()` creates the data directory and stores configuration
+1. **Initialization**: `TorService.configure()` empties the data directory in place (creating it if missing, keeping its attributes such as the host app's data-protection class) and stores configuration
 2. **Startup**: `TorService.start()` launches `tor_run_main()` in a background thread
 3. **Port Discovery**: stdout is parsed to find the auto-assigned SOCKS5 port
 4. **Bootstrap Monitoring**: stdout is parsed for bootstrap progress (0-100%)

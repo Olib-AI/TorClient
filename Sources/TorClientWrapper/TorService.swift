@@ -522,18 +522,30 @@ public actor TorService {
         // assertion on a second tor_run_main(); it does not - that assertion
         // came from running a second instance while the first had never
         // returned. See Scripts/patches/ for what in-process restart needs.
-        let fileManager = FileManager.default
-        if fileManager.fileExists(atPath: config.dataDirectory.path) {
-            try fileManager.removeItem(at: config.dataDirectory)
-        }
-
-        // Recreate data directory
-        try fileManager.createDirectory(
-            at: config.dataDirectory,
-            withIntermediateDirectories: true
-        )
+        try Self.emptyDataDirectory(at: config.dataDirectory)
 
         self.configuration = config
+    }
+
+    /// Empties the data directory in place, creating it only if it is missing.
+    ///
+    /// The directory itself is never removed: its own attributes belong to the host app,
+    /// notably the iOS data-protection class every file Tor creates inside inherits. A
+    /// remove-and-recreate would silently replace that class with the app's default.
+    private static func emptyDataDirectory(at url: URL) throws {
+        let fileManager = FileManager.default
+        let path = url.path
+        // attributesOfItem does not follow symbolic links: a link here is not our directory.
+        if let type = try? fileManager.attributesOfItem(atPath: path)[.type] as? FileAttributeType {
+            if type == .typeDirectory {
+                for child in try fileManager.contentsOfDirectory(atPath: path) {
+                    try fileManager.removeItem(at: url.appendingPathComponent(child))
+                }
+                return
+            }
+            try fileManager.removeItem(at: url)
+        }
+        try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
     }
 
     /// Start Tor daemon
