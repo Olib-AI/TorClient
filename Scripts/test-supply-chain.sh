@@ -109,6 +109,117 @@ printf '%s  tor-0.4.9.16.tar.gz\n' "$TORSHA_FAKE" > "$WORK/sc/signatures/tor-0.4
 expect_reject "forged pin + forged .sha256sum without a matching signature is rejected" \
     lib sc_verify_signature "$WORK/files/tor-0.4.9.16.tar.gz"
 
+echo "== signature made after the signing key expired"
+# Real case: David Goulet signed 0.4.9.16 after our pinned copy of his key
+# expired, and Alexander Faeroy signed it inside his key's life.
+AHF_FPR=1C1BC007A9F607AA8152C040BEA7B180B1491921
+DGOULET_FPR=B74417EDDF22AC9F9E90F49142E86A2A11F48D36
+TOR_TGZ=tor-0.4.9.16.tar.gz
+trust_only() {  # <fingerprint>: pin $TOR_TGZ to this signer alone
+    fresh_sc
+    awk -v f="$TOR_TGZ" -v k="$1" '$1 == f { $5 = k } { print }' "$REAL_SC/sources.lock" > "$WORK/sc/sources.lock"
+}
+fresh_file "$TOR_TGZ"
+trust_only "$AHF_FPR"
+expect_ok "Tor tarball passes on the signature made while the signer's key was valid" \
+    lib sc_verify "$WORK/files/$TOR_TGZ"
+trust_only "$DGOULET_FPR"
+expect_reject "Tor tarball with only the signature made after the key expired is rejected" \
+    lib sc_verify "$WORK/files/$TOR_TGZ"
+if grep -q 'made after that key expired' "$WORK/out"; then
+    pass "that rejection says the signature came after the key expired"
+else
+    fail "that rejection does not name the reason"; sed 's/^/      /' "$WORK/out"
+fi
+
+# Synthetic keys, so both sides of the boundary are covered for a primary key
+# and for a signing subkey. gpg will not sign with an expired key, so the
+# pinned copy is exported while the key expires, then the expiry is lifted in
+# the signer's own keyring and the late signature made with that. This is the
+# shape of the real case: the pinned copy has an expiry that the signer later
+# extended.
+GEN="$WORK/gen"; mkdir -p "$GEN"; chmod 700 "$GEN"
+T0=1600000000 T_EARLY=$((T0 + 86400)) T_EXP=$((T0 + 10 * 86400)) T_LATE=$((T0 + 20 * 86400))
+kgpg() { local at="$1"; shift; gpg --homedir "$GEN" --batch --yes --quiet --pinentry-mode loopback --passphrase '' \
+    --faked-system-time "$at!" --ignore-time-conflict "$@" 2>/dev/null; }
+echo "payload" > "$WORK/payload.tar.gz"
+PAYLOAD_SHA="$(shasum -a 256 "$WORK/payload.tar.gz" | awk '{print $1}')"
+new_key() {  # <uid> <primary expiry "seconds=N" or "never">; primary fingerprint lands in $NEWFPR
+    kgpg "$T0" --quick-generate-key "$1" ed25519 cert "$2"
+    NEWFPR="$(gpg --homedir "$GEN" --batch --with-colons --fixed-list-mode --list-keys "$1" 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')"
+}
+synthetic_sc() {  # <pubkey file> <signature file> <primary fpr>
+    fresh_sc
+    cp "$1" "$WORK/sc/keys/synthetic.asc"
+    cp "$2" "$WORK/sc/signatures/payload.tar.gz.asc"
+    printf 'payload.tar.gz %s synthetic.asc payload.tar.gz.asc %s\n' "$PAYLOAD_SHA" "$3" >> "$WORK/sc/sources.lock"
+}
+
+# Primary key and signing subkey both expire.
+new_key "primary@test.invalid" "seconds=$((T_EXP - T0))"
+PRIMARY_FPR="$NEWFPR"
+kgpg "$T0" --quick-add-key "$PRIMARY_FPR" ed25519 sign "seconds=$((T_EXP - T0))"
+kgpg "$T0" --armor --export "$PRIMARY_FPR" > "$WORK/primary-pinned.asc"
+SIGNING_SUB="$(gpg --homedir "$GEN" --batch --with-colons --fixed-list-mode --list-keys "$PRIMARY_FPR" 2>/dev/null | awk -F: '$1 == "sub" { s = 1; next } $1 == "fpr" && s { print $10; exit }')"
+kgpg "$T_EARLY" --armor --detach-sign --local-user "${SIGNING_SUB}!" -o "$WORK/in-life.asc" "$WORK/payload.tar.gz"
+kgpg "$((T0 + 3600))" --quick-set-expire "$PRIMARY_FPR" never
+kgpg "$((T0 + 3600))" --quick-set-expire "$PRIMARY_FPR" never '*'
+kgpg "$T_LATE" --armor --detach-sign --local-user "${SIGNING_SUB}!" -o "$WORK/after-life.asc" "$WORK/payload.tar.gz"
+synthetic_sc "$WORK/primary-pinned.asc" "$WORK/in-life.asc" "$PRIMARY_FPR"
+expect_ok "signature from before the key expired still counts, though the key has expired now" \
+    lib sc_verify_signature "$WORK/payload.tar.gz"
+synthetic_sc "$WORK/primary-pinned.asc" "$WORK/after-life.asc" "$PRIMARY_FPR"
+expect_reject "signature made after the pinned key expired is rejected" \
+    lib sc_verify_signature "$WORK/payload.tar.gz"
+
+# Only the signing subkey expires; the primary key never does.
+new_key "subkey@test.invalid" never
+SUBONLY_FPR="$NEWFPR"
+kgpg "$T0" --quick-add-key "$SUBONLY_FPR" ed25519 sign "seconds=$((T_EXP - T0))"
+kgpg "$T0" --armor --export "$SUBONLY_FPR" > "$WORK/subonly-pinned.asc"
+SUBONLY_SUB="$(gpg --homedir "$GEN" --batch --with-colons --fixed-list-mode --list-keys "$SUBONLY_FPR" 2>/dev/null | awk -F: '$1 == "sub" { s = 1; next } $1 == "fpr" && s { print $10; exit }')"
+kgpg "$T_EARLY" --armor --detach-sign --local-user "${SUBONLY_SUB}!" -o "$WORK/sub-in-life.asc" "$WORK/payload.tar.gz"
+kgpg "$((T0 + 3600))" --quick-set-expire "$SUBONLY_FPR" never '*'
+kgpg "$T_LATE" --armor --detach-sign --local-user "${SUBONLY_SUB}!" -o "$WORK/sub-after-life.asc" "$WORK/payload.tar.gz"
+synthetic_sc "$WORK/subonly-pinned.asc" "$WORK/sub-in-life.asc" "$SUBONLY_FPR"
+expect_ok "signature from before the signing subkey expired counts" \
+    lib sc_verify_signature "$WORK/payload.tar.gz"
+synthetic_sc "$WORK/subonly-pinned.asc" "$WORK/sub-after-life.asc" "$SUBONLY_FPR"
+expect_reject "signature made after only the signing subkey expired is rejected" \
+    lib sc_verify_signature "$WORK/payload.tar.gz"
+gpgconf --homedir "$GEN" --kill all >/dev/null 2>&1 || true
+
+# Fail closed when a date cannot be read. A gpg wrapper changes only the output
+# named by $STUB_MODE; the signature that it reports is otherwise a good one.
+REAL_GPG="$(command -v gpg)"
+STUB="$WORK/stub"; mkdir -p "$STUB"
+{
+    echo '#!/bin/bash'
+    echo 'case " $* " in'
+    echo '  *" --list-keys "*)'
+    echo '    case "$STUB_MODE" in'
+    echo "      nolist) exit 0 ;;"
+    echo "      badexp) exec \"$REAL_GPG\" \"\$@\" | awk -F: -v OFS=: '\$1 == \"pub\" || \$1 == \"sub\" { \$7 = \"soon\" } { print }' ;;"
+    echo '    esac ;;'
+    echo '  *" --verify "*)'
+    echo '    case "$STUB_MODE" in'
+    echo "      badts) \"$REAL_GPG\" \"\$@\" | awk '\$2 == \"VALIDSIG\" { \$5 = \"yesterday\" } { print }'; exit 0 ;;"
+    echo '    esac ;;'
+    echo 'esac'
+    echo "exec \"$REAL_GPG\" \"\$@\""
+} > "$STUB/gpg"
+chmod +x "$STUB/gpg"
+stubbed() { local mode="$1"; shift; PATH="$STUB:$PATH" STUB_MODE="$mode" lib "$@"; }
+trust_only "$AHF_FPR"
+expect_ok "a gpg wrapper that changes nothing still passes (the cases below test what they say)" \
+    stubbed none sc_verify_signature "$WORK/files/$TOR_TGZ"
+expect_reject "key expiry that cannot be listed is rejected" \
+    stubbed nolist sc_verify_signature "$WORK/files/$TOR_TGZ"
+expect_reject "key expiry that is not a number is rejected" \
+    stubbed badexp sc_verify_signature "$WORK/files/$TOR_TGZ"
+expect_reject "signature time that is not a number is rejected" \
+    stubbed badts sc_verify_signature "$WORK/files/$TOR_TGZ"
+
 echo "== end to end: build-xcframework.sh --sources-only"
 E2E="$WORK/e2e"; mkdir -p "$E2E"
 for t in $TARBALLS; do cp -c "$CACHE/$t" "$E2E/$t" 2>/dev/null || cp "$CACHE/$t" "$E2E/$t"; done

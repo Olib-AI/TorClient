@@ -46,8 +46,35 @@ sc_verify_hash() {
     echo "  sha256 OK    $name"
 }
 
+# sc_key_expiries <gpg-home>: prints "<fingerprint> <expiry>" for every primary
+# key and subkey in the keyring. <expiry> is "-" when the key does not expire.
+sc_key_expiries() {
+    gpg --homedir "$1" --batch --with-colons --fixed-list-mode --list-keys 2>/dev/null | awk -F: '
+        $1 == "pub" || $1 == "sub" { exp_ts = ($7 == "") ? "-" : $7; pending = 1; next }
+        $1 == "fpr" && pending     { print $10, exp_ts; pending = 0 }'
+}
+
+# sc_signature_in_key_life <expiries> <sig-time> <fingerprint>: true only when
+# the signature was made no later than that key's expiry. Fails closed on a
+# time or an expiry that cannot be read.
+sc_signature_in_key_life() {
+    local expiries="$1" sig_time="$2" fpr="$3" key_exp
+    case "$sig_time" in
+        ""|*[!0-9]*) sc_err "cannot read the signature time '$sig_time' for key $fpr"; return 1 ;;
+    esac
+    key_exp="$(printf '%s\n' "$expiries" | awk -v f="$fpr" '$1 == f { print $2; exit }')"
+    case "$key_exp" in
+        "-") return 0 ;;
+        ""|*[!0-9]*) sc_err "cannot read the expiry of key $fpr"; return 1 ;;
+    esac
+    if [ "$sig_time" -gt "$key_exp" ]; then
+        sc_err "signature by key $fpr was made after that key expired (signed $sig_time, expired $key_exp); it does not count"
+        return 1
+    fi
+}
+
 sc_verify_signature() {
-    local file="$1" name keyring sig trusted signed_obj gpg_home status fprs fpr listed ok=0
+    local file="$1" name keyring sig trusted signed_obj gpg_home status expiries sigs sig_fpr sig_time fpr fprs_seen listed ok=0
     name="$(basename "$file")"
     keyring="$(sc_lock_field "$name" 3)" || { sc_err "no keyring pinned for $name"; return 1; }
     sig="$(sc_lock_field "$name" 4)"      || { sc_err "no signature pinned for $name"; return 1; }
@@ -87,6 +114,7 @@ sc_verify_signature() {
     fi
     status="$(gpg --homedir "$gpg_home" --batch --status-fd 1 --verify \
         "$SC_DIR/signatures/$sig" "$signed_obj" 2>/dev/null || true)"
+    expiries="$(sc_key_expiries "$gpg_home")"
     gpgconf --homedir "$gpg_home" --kill all >/dev/null 2>&1 || true
     rm -rf "$gpg_home"
 
@@ -94,17 +122,27 @@ sc_verify_signature() {
         sc_err "BAD signature on $(basename "$signed_obj")"; return 1
     fi
     # VALIDSIG <sig-fpr> <date> <ts> <exp> <ver> <res> <pk-algo> <hash-algo> <class> <primary-fpr>
-    # A signature made by a key that has since expired is still VALIDSIG (with
-    # EXPKEYSIG): it was made while the key was valid, and the hash pin fixes
-    # the content regardless.
-    fprs="$(printf '%s\n' "$status" | awk '$2 == "VALIDSIG" { print $NF }')"
-    for fpr in $fprs; do
+    # A key that has since expired is still VALIDSIG (with EXPKEYSIG) whatever
+    # the dates, so the dates are compared here: a signature counts only if it
+    # was made while both the signing key and its primary key were valid. A
+    # signature made before expiry stays good; one made after does not.
+    sigs="$(printf '%s\n' "$status" | awk '$2 == "VALIDSIG" { print $3, $5, $NF }')"
+    fprs_seen=""
+    while read -r sig_fpr sig_time fpr; do
+        [ -n "$fpr" ] || continue
+        fprs_seen="$fprs_seen $fpr"
         case ",$trusted," in
-            *",$fpr,"*) ok=1; echo "  signature OK $(basename "$signed_obj") (primary key $fpr)" ;;
+            *",$fpr,"*) ;;
+            *) continue ;;
         esac
-    done
+        sc_signature_in_key_life "$expiries" "$sig_time" "$sig_fpr" || continue
+        sc_signature_in_key_life "$expiries" "$sig_time" "$fpr" || continue
+        ok=1; echo "  signature OK $(basename "$signed_obj") (primary key $fpr)"
+    done <<EOF_SIGS
+$sigs
+EOF_SIGS
     if [ "$ok" != 1 ]; then
-        sc_err "no valid signature from a pinned key on $(basename "$signed_obj") (valid signers: ${fprs:-none})"
+        sc_err "no valid signature from a pinned key, made while that key was valid, on $(basename "$signed_obj") (signers:${fprs_seen:- none})"
         return 1
     fi
 }
