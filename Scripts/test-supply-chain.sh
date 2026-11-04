@@ -14,7 +14,7 @@ PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
 CACHE="${TORCLIENT_BUILD_DIR:-${PACKAGE_DIR}/.build-tor}"
 REAL_SC="${SCRIPT_DIR}/supply-chain"
 
-TARBALLS="zlib-1.3.2.tar.gz openssl-4.1.0.tar.gz libevent-2.1.13-stable.tar.gz tor-0.4.9.15.tar.gz"
+TARBALLS="zlib-1.3.2.tar.gz openssl-4.1.0.tar.gz libevent-2.1.13-stable.tar.gz tor-0.4.9.16.tar.gz"
 for t in $TARBALLS; do
     [ -f "$CACHE/$t" ] || { echo "missing $CACHE/$t; run Scripts/build-xcframework.sh --sources-only first"; exit 2; }
 done
@@ -89,20 +89,25 @@ sed -i '' -E 's/^(zlib-1\.3\.2\.tar\.gz.*[[:space:]])5ED46A6721D365587791E2AA783
 expect_reject "valid signature from a key that is not pinned for this file is rejected" \
     lib sc_verify "$WORK/files/zlib-1.3.2.tar.gz"
 
-fresh_sc
-sed -i '' -E 's/^1/2/' "$WORK/sc/signatures/tor-0.4.9.15.tar.gz.sha256sum"
-fresh_file tor-0.4.9.15.tar.gz
-expect_reject "Tor .sha256sum altered (hash no longer matches pin or signature) is rejected" \
-    lib sc_verify "$WORK/files/tor-0.4.9.15.tar.gz"
+# A first hex digit that differs from the pinned Tor hash. Derived, because a
+# fixed `s/^1/2/` changes nothing once a new release's hash starts with another
+# digit: the case then hands the checks a pristine file and fails as "ACCEPTED".
+TOR_OTHER_DIGIT="$(awk '$1 == "tor-0.4.9.16.tar.gz" { print (substr($2, 1, 1) == "0") ? "1" : "0" }' "$REAL_SC/sources.lock")"
 
 fresh_sc
-sed -i '' -E 's/^(tor-0\.4\.9\.15\.tar\.gz[[:space:]]+)1/\12/' "$WORK/sc/sources.lock"
-TORSHA_FAKE="$(awk '$1 == "tor-0.4.9.15.tar.gz" { print $2 }' "$WORK/sc/sources.lock")"
-printf '%s  tor-0.4.9.15.tar.gz\n' "$TORSHA_FAKE" > "$WORK/sc/signatures/tor-0.4.9.15.tar.gz.sha256sum"
+sed -i '' -E "s/^./$TOR_OTHER_DIGIT/" "$WORK/sc/signatures/tor-0.4.9.16.tar.gz.sha256sum"
+fresh_file tor-0.4.9.16.tar.gz
+expect_reject "Tor .sha256sum altered (hash no longer matches pin or signature) is rejected" \
+    lib sc_verify "$WORK/files/tor-0.4.9.16.tar.gz"
+
+fresh_sc
+sed -i '' -E "s/^(tor-0\.4\.9\.16\.tar\.gz[[:space:]]+)./\1$TOR_OTHER_DIGIT/" "$WORK/sc/sources.lock"
+TORSHA_FAKE="$(awk '$1 == "tor-0.4.9.16.tar.gz" { print $2 }' "$WORK/sc/sources.lock")"
+printf '%s  tor-0.4.9.16.tar.gz\n' "$TORSHA_FAKE" > "$WORK/sc/signatures/tor-0.4.9.16.tar.gz.sha256sum"
 # Tarball rewritten to match the forged pin: hash check is bypassed by
 # construction, so only the signature over the .sha256sum stands in the way.
 expect_reject "forged pin + forged .sha256sum without a matching signature is rejected" \
-    lib sc_verify_signature "$WORK/files/tor-0.4.9.15.tar.gz"
+    lib sc_verify_signature "$WORK/files/tor-0.4.9.16.tar.gz"
 
 echo "== end to end: build-xcframework.sh --sources-only"
 E2E="$WORK/e2e"; mkdir -p "$E2E"
