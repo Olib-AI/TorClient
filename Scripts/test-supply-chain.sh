@@ -14,7 +14,7 @@ PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
 CACHE="${TORCLIENT_BUILD_DIR:-${PACKAGE_DIR}/.build-tor}"
 REAL_SC="${SCRIPT_DIR}/supply-chain"
 
-TARBALLS="zlib-1.3.2.tar.gz openssl-4.1.0.tar.gz libevent-2.1.13-stable.tar.gz tor-0.4.9.16.tar.gz"
+TARBALLS="zlib-1.4.tar.gz openssl-4.1.0.tar.gz libevent-2.1.13-stable.tar.gz tor-0.4.9.17.tar.gz"
 for t in $TARBALLS; do
     [ -f "$CACHE/$t" ] || { echo "missing $CACHE/$t; run Scripts/build-xcframework.sh --sources-only first"; exit 2; }
 done
@@ -49,12 +49,12 @@ for t in $TARBALLS; do
     expect_ok "pinned, signed $t is accepted" lib sc_verify "$WORK/files/$t"
 done
 
-fresh_file zlib-1.3.2.tar.gz
-printf 'x' >> "$WORK/files/zlib-1.3.2.tar.gz"
-expect_reject "tarball with one appended byte is rejected" lib sc_verify "$WORK/files/zlib-1.3.2.tar.gz"
+fresh_file zlib-1.4.tar.gz
+printf 'x' >> "$WORK/files/zlib-1.4.tar.gz"
+expect_reject "tarball with one appended byte is rejected" lib sc_verify "$WORK/files/zlib-1.4.tar.gz"
 expect_reject "tampered CACHED tarball is rejected by sc_fetch (no re-download)" \
-    lib sc_fetch "https://invalid.example/zlib-1.3.2.tar.gz" "$WORK/files/zlib-1.3.2.tar.gz"
-if [ -f "$WORK/files/zlib-1.3.2.tar.gz" ] && [ "$(shasum -a 256 < "$WORK/files/zlib-1.3.2.tar.gz")" != "$(shasum -a 256 < "$CACHE/zlib-1.3.2.tar.gz")" ]; then
+    lib sc_fetch "https://invalid.example/zlib-1.4.tar.gz" "$WORK/files/zlib-1.4.tar.gz"
+if [ -f "$WORK/files/zlib-1.4.tar.gz" ] && [ "$(shasum -a 256 < "$WORK/files/zlib-1.4.tar.gz")" != "$(shasum -a 256 < "$CACHE/zlib-1.4.tar.gz")" ]; then
     pass "tampered cached tarball is left in place for inspection, not silently replaced"
 else
     fail "tampered cached tarball was modified or removed"
@@ -75,46 +75,46 @@ expect_reject "pin edited in sources.lock (content no longer matches) is rejecte
 fresh_sc
 # Flip one character inside the base64 body of the detached signature.
 awk 'NR==4 { c = substr($0, 10, 1); r = (c == "A") ? "B" : "A"; $0 = substr($0, 1, 9) r substr($0, 11) } { print }' \
-    "$REAL_SC/signatures/zlib-1.3.2.tar.gz.asc" > "$WORK/sc/signatures/zlib-1.3.2.tar.gz.asc"
-fresh_file zlib-1.3.2.tar.gz
-expect_reject "corrupted upstream signature is rejected" lib sc_verify "$WORK/files/zlib-1.3.2.tar.gz"
+    "$REAL_SC/signatures/zlib-1.4.tar.gz.asc" > "$WORK/sc/signatures/zlib-1.4.tar.gz.asc"
+fresh_file zlib-1.4.tar.gz
+expect_reject "corrupted upstream signature is rejected" lib sc_verify "$WORK/files/zlib-1.4.tar.gz"
 
 fresh_sc
 cp "$REAL_SC/keys/openssl.asc" "$WORK/sc/keys/zlib.asc"
 expect_reject "signature checked against the wrong project's key is rejected" \
-    lib sc_verify "$WORK/files/zlib-1.3.2.tar.gz"
+    lib sc_verify "$WORK/files/zlib-1.4.tar.gz"
 
 fresh_sc
-sed -i '' -E 's/^(zlib-1\.3\.2\.tar\.gz.*[[:space:]])5ED46A6721D365587791E2AA783FCD8E58BCAFBA$/\1B146647E45A7B33947AB226B2A2C87D161692D40/' "$WORK/sc/sources.lock"
+sed -i '' -E 's/^(zlib-1\.4\.tar\.gz.*[[:space:]])5ED46A6721D365587791E2AA783FCD8E58BCAFBA$/\1B146647E45A7B33947AB226B2A2C87D161692D40/' "$WORK/sc/sources.lock"
 expect_reject "valid signature from a key that is not pinned for this file is rejected" \
-    lib sc_verify "$WORK/files/zlib-1.3.2.tar.gz"
+    lib sc_verify "$WORK/files/zlib-1.4.tar.gz"
 
 # A first hex digit that differs from the pinned Tor hash. Derived, because a
 # fixed `s/^1/2/` changes nothing once a new release's hash starts with another
 # digit: the case then hands the checks a pristine file and fails as "ACCEPTED".
-TOR_OTHER_DIGIT="$(awk '$1 == "tor-0.4.9.16.tar.gz" { print (substr($2, 1, 1) == "0") ? "1" : "0" }' "$REAL_SC/sources.lock")"
+TOR_OTHER_DIGIT="$(awk '$1 == "tor-0.4.9.17.tar.gz" { print (substr($2, 1, 1) == "0") ? "1" : "0" }' "$REAL_SC/sources.lock")"
 
 fresh_sc
-sed -i '' -E "s/^./$TOR_OTHER_DIGIT/" "$WORK/sc/signatures/tor-0.4.9.16.tar.gz.sha256sum"
-fresh_file tor-0.4.9.16.tar.gz
+sed -i '' -E "s/^./$TOR_OTHER_DIGIT/" "$WORK/sc/signatures/tor-0.4.9.17.tar.gz.sha256sum"
+fresh_file tor-0.4.9.17.tar.gz
 expect_reject "Tor .sha256sum altered (hash no longer matches pin or signature) is rejected" \
-    lib sc_verify "$WORK/files/tor-0.4.9.16.tar.gz"
+    lib sc_verify "$WORK/files/tor-0.4.9.17.tar.gz"
 
 fresh_sc
-sed -i '' -E "s/^(tor-0\.4\.9\.16\.tar\.gz[[:space:]]+)./\1$TOR_OTHER_DIGIT/" "$WORK/sc/sources.lock"
-TORSHA_FAKE="$(awk '$1 == "tor-0.4.9.16.tar.gz" { print $2 }' "$WORK/sc/sources.lock")"
-printf '%s  tor-0.4.9.16.tar.gz\n' "$TORSHA_FAKE" > "$WORK/sc/signatures/tor-0.4.9.16.tar.gz.sha256sum"
+sed -i '' -E "s/^(tor-0\.4\.9\.17\.tar\.gz[[:space:]]+)./\1$TOR_OTHER_DIGIT/" "$WORK/sc/sources.lock"
+TORSHA_FAKE="$(awk '$1 == "tor-0.4.9.17.tar.gz" { print $2 }' "$WORK/sc/sources.lock")"
+printf '%s  tor-0.4.9.17.tar.gz\n' "$TORSHA_FAKE" > "$WORK/sc/signatures/tor-0.4.9.17.tar.gz.sha256sum"
 # Tarball rewritten to match the forged pin: hash check is bypassed by
 # construction, so only the signature over the .sha256sum stands in the way.
 expect_reject "forged pin + forged .sha256sum without a matching signature is rejected" \
-    lib sc_verify_signature "$WORK/files/tor-0.4.9.16.tar.gz"
+    lib sc_verify_signature "$WORK/files/tor-0.4.9.17.tar.gz"
 
 echo "== signature made after the signing key expired"
-# Real case: David Goulet signed 0.4.9.16 after our pinned copy of his key
+# Real case: David Goulet signed 0.4.9.17 after our pinned copy of his key
 # expired, and Alexander Faeroy signed it inside his key's life.
 AHF_FPR=1C1BC007A9F607AA8152C040BEA7B180B1491921
 DGOULET_FPR=B74417EDDF22AC9F9E90F49142E86A2A11F48D36
-TOR_TGZ=tor-0.4.9.16.tar.gz
+TOR_TGZ=tor-0.4.9.17.tar.gz
 trust_only() {  # <fingerprint>: pin $TOR_TGZ to this signer alone
     fresh_sc
     awk -v f="$TOR_TGZ" -v k="$1" '$1 == f { $5 = k } { print }' "$REAL_SC/sources.lock" > "$WORK/sc/sources.lock"

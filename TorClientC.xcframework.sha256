@@ -1,8 +1,8 @@
-# TorClientC.xcframework - Tor 0.4.9.16, OpenSSL 4.1.0, libevent 2.1.13-stable, zlib 1.3.2
+# TorClientC.xcframework - Tor 0.4.9.17, OpenSSL 4.1.0, libevent 2.1.13-stable, zlib 1.4
 # toolchain: Apple clang version 21.0.0 (clang-2100.4.1.1), iphoneos SDK 24B8118
-# tor patch set: 69f05865820bd4ff3de123960d0222bad0be8eb61bd6b583ddd389459b4f5986
+# tor patch set: 6c2fe60019605f01a3656650f05794de077a041a61e448321dd6df4956be1b32
 # Check: (cd TorClientC.xcframework && grep -v '^#' ../TorClientC.xcframework.sha256 | shasum -a 256 -c)
-0c2e52702719cb22c2a678c7808d5f2b752bc0970e103500b6118863f528eecb  Info.plist
+e3c77a14f08524c68bb781226f9c737737794b58c261fc69f6e3ff91bdc22ba6  Info.plist
 23a401ad32cfca6653e1529bb392c99f9eae5471d1d8126798b6a876da6f7c3c  ios-arm64_arm64e/Headers/evdns.h
 6b6109226e90afb12183e08529b4e7feceb84b29643eb20519eb32411a3344e7  ios-arm64_arm64e/Headers/event.h
 ca0e01cd9996615a5a1f755e23371941703be4fb4439b25f8408184a06b08e4f  ios-arm64_arm64e/Headers/event2/buffer.h
@@ -179,7 +179,7 @@ f1b479a6eef6105578cebb29496e64ee6e6e5a9c56c9cf7a069b761c3f149bf4  ios-arm64_arm6
 2bfeecae7d784bdcfa211d7288553afdfe85b6127355e60f5f9581c764500740  ios-arm64_arm64e/Headers/openssl/x509v3.h
 4d486f9cacf8fe4f190b797f6c81d3cf62fcf73d0ced29a594ff1438462055fb  ios-arm64_arm64e/Headers/openssl/x509v3err.h
 c346e767d3e6dbad44d1802579e7e4a8cf1b1ff8595152ebd4679b05d2de6df3  ios-arm64_arm64e/Headers/tor_api.h
-bacdee432eecdfe293bffed943df8c6c89fa448e216c0768a144f0712e4b3e0f  ios-arm64_arm64e/libTorClient.a
+b59cf41b0ea0f2a22e4f948a1a0f452cc99d48bb94ec0641175016b485e412cd  ios-arm64_arm64e/libTorClient.a
 23a401ad32cfca6653e1529bb392c99f9eae5471d1d8126798b6a876da6f7c3c  ios-arm64_x86_64-simulator/Headers/evdns.h
 6b6109226e90afb12183e08529b4e7feceb84b29643eb20519eb32411a3344e7  ios-arm64_x86_64-simulator/Headers/event.h
 ca0e01cd9996615a5a1f755e23371941703be4fb4439b25f8408184a06b08e4f  ios-arm64_x86_64-simulator/Headers/event2/buffer.h
@@ -356,4 +356,4 @@ f1b479a6eef6105578cebb29496e64ee6e6e5a9c56c9cf7a069b761c3f149bf4  ios-arm64_x86_
 2bfeecae7d784bdcfa211d7288553afdfe85b6127355e60f5f9581c764500740  ios-arm64_x86_64-simulator/Headers/openssl/x509v3.h
 4d486f9cacf8fe4f190b797f6c81d3cf62fcf73d0ced29a594ff1438462055fb  ios-arm64_x86_64-simulator/Headers/openssl/x509v3err.h
 c346e767d3e6dbad44d1802579e7e4a8cf1b1ff8595152ebd4679b05d2de6df3  ios-arm64_x86_64-simulator/Headers/tor_api.h
-3d4afbbf4b31d3ddf79b5f57a8d6dc93bf29315233ca2cf0463a6f1d70f4b0cd  ios-arm64_x86_64-simulator/libTorClient.a
+ede71d62cb10cc1c5ff9b85da809ab15d75bb9ae89c8221e6ba4d8d54b95b9f2  ios-arm64_x86_64-simulator/libTorClient.a

@@ -54,10 +54,10 @@ set -o pipefail
 # CONFIGURATION
 # =============================================================================
 
-ZLIB_VERSION="1.3.2"
+ZLIB_VERSION="1.4"
 OPENSSL_VERSION="4.1.0"
 LIBEVENT_VERSION="2.1.13-stable"
-TOR_VERSION="0.4.9.16"
+TOR_VERSION="0.4.9.17"
 MIN_IOS="18.0"
 
 ZLIB_URL="https://zlib.net/zlib-${ZLIB_VERSION}.tar.gz"
@@ -96,9 +96,9 @@ SECURITY_WARNINGS="$SECURITY_WARNINGS -Wshadow -Wempty-body"
 REPRO_CFLAGS="-ffile-prefix-map=${BUILD_DIR}=/torclient-build"
 COMMON_CFLAGS="$HARDEN_CFLAGS $SECURITY_WARNINGS $REPRO_CFLAGS"
 
-# Deterministic archives and build dates (Tor 0.4.9.16 release day).
+# Deterministic archives and build dates (Tor 0.4.9.17 release day).
 export ZERO_AR_DATE=1
-export SOURCE_DATE_EPOCH=1793750400
+export SOURCE_DATE_EPOCH=1794528000
 
 # Auto-detect toolchain paths
 IOS_SDK="$(xcrun --sdk iphoneos --show-sdk-path)"

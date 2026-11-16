@@ -98,10 +98,10 @@ line in `sources.lock` and the file in `signatures/` (see the comments in
 
 | Library | Version | Source |
 |---------|---------|--------|
-| Tor | 0.4.9.16 | https://dist.torproject.org/ |
+| Tor | 0.4.9.17 | https://dist.torproject.org/ |
 | OpenSSL | 4.1.0 | https://github.com/openssl/openssl |
 | libevent | 2.1.13-stable | https://github.com/libevent/libevent |
-| zlib | 1.3.2 | https://zlib.net/ |
+| zlib | 1.4 | https://zlib.net/ |
 
 **Build time**: ~10-30 minutes depending on CPU. OpenSSL is the longest step.
 
@@ -422,10 +422,10 @@ matching half of the fat archive. Apps that build arm64 only are unaffected.
 ### Library Contents
 
 `libTorClient.a` is a combined static library containing:
-- **Tor 0.4.9.16**: The Onion Router (client-only build)
+- **Tor 0.4.9.17**: The Onion Router (client-only build)
 - **OpenSSL 4.1.0**: Cryptographic library
 - **libevent 2.1.13**: Event notification library
-- **zlib 1.3.2**: Compression library
+- **zlib 1.4**: Compression library
 
 All dependencies are statically linked into `libTorClient.a`, which is linked into
 exactly one image: the `TorClientWrapper` product is a **dynamic** library, so the app
